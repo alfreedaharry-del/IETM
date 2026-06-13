@@ -43,13 +43,19 @@ import { EngineeringDiagram } from './components/EngineeringDiagram';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
+// Asset URLs via Vite's import meta URL to ensure correct production paths
+const logoImg = new URL('./assets/images/logo-1.png', import.meta.url).href;
+const pdfUserHandbook = new URL('./assets/pdf/st1.pdf', import.meta.url).href;
+const pdfTech_1_1 = new URL('./assets/pdf/st2.pdf', import.meta.url).href;
+const pdfTech_1_2 = new URL('./assets/pdf/st3.pdf', import.meta.url).href;
+
 // Configure the worker to use the local module via Vite's URL handling for deployment stability
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const PDF_MAPPING: Record<string, string> = {
-  'user-handbook': '/src/assets/pdf/st1.pdf',
-  'tech-1-1': '/src/assets/pdf/st2.pdf',
-  'tech-1-2': '/src/assets/pdf/st3.pdf'
+  'user-handbook': pdfUserHandbook,
+  'tech-1-1': pdfTech_1_1,
+  'tech-1-2': pdfTech_1_2
 };
 
 interface PdfPageRendererProps {
@@ -856,7 +862,7 @@ export default function App() {
       {/* LEFT SIDE - Product Image only (about 40-45% of page width) */}
       <div className="w-[42%] flex items-center justify-center p-8 bg-white border-none shrink-0">
         <img 
-          src="/src/assets/images/logo-1.png" 
+          src={logoImg} 
           alt="ELCOM Innovations Logo" 
           className="max-h-[75vh] w-auto object-contain border-none shadow-none"
           referrerPolicy="no-referrer"
@@ -1009,7 +1015,7 @@ export default function App() {
             backgroundPosition: 'center center'
           }}></div>
           <div className="flex items-center gap-3 relative z-10">
-            <img src="/src/assets/images/logo-1.png" alt="ELCOM Innovations Logo" className="h-8 w-auto object-contain" />
+            <img src={logoImg} alt="ELCOM Innovations Logo" className="h-8 w-auto object-contain" />
             <div className="text-left font-sans">
               <span className="block leading-none text-sm font-bold tracking-wide uppercase text-[#000000]">ELCOM Innovations</span>
             </div>

@@ -253,7 +253,7 @@ export default function App() {
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const bottomTrackRef = useRef<HTMLDivElement | null>(null);
   const lowerStatusRef = useRef<HTMLDivElement | null>(null);
-  const [viewerHeight, setViewerHeight] = useState<number | null>(null);
+  // viewerHeight removed: rely on CSS flexbox for responsive sizing
 
   // Hover drawer & speech state
   const [hoverInfo, setHoverInfo] = useState<null | { id: string; title: string; desc: string; top: number; left: number }>(null);
@@ -1206,7 +1206,7 @@ export default function App() {
         <div className="flex-grow flex flex-row overflow-hidden min-h-0 bg-neutral-100 p-3 gap-3">
           
           {/* LEFT COLUMN: NAVIGATION EXPLORER PANEL */}
-          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }} style={{ height: viewerHeight ? `${viewerHeight}px` : undefined }}>
+          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col h-full min-h-0 bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }}>
             <div className="text-[#0ea5e9] text-sm font-bold font-sans tracking-wide border-b border-neutral-100 pb-2 mb-3 uppercase flex items-center gap-2">
               <span className="w-1.5 h-3 bg-[#0ea5e9] rounded-sm inline-block"></span>
               <span>Document Explorer</span>
@@ -1419,12 +1419,8 @@ export default function App() {
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }}
-                className={`overflow-auto p-2 relative flex select-none bg-[#edf0f2] ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
-                style={{ 
-                  scrollbarGutter: 'stable',
-                  perspective: 1500,
-                  height: viewerHeight ? `${viewerHeight}px` : undefined
-                }}
+                className={`overflow-auto p-2 relative flex select-none bg-[#edf0f2] flex-grow min-h-0 ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
+                style={{ scrollbarGutter: 'stable', perspective: 1500 }}
               >
                 
                 {/* Search error alert dialog */}
@@ -1944,27 +1940,8 @@ export default function App() {
     };
   }, []);
 
-  // Compute available height for the central viewer area so content never overflows viewport
-  // Accounts for workspace padding (12px top + 12px bottom = 24px) and gap (12px)
-  useEffect(() => {
-    const measure = () => {
-      const hh = headerRef.current?.offsetHeight || 0;
-      const th = toolbarRef.current?.offsetHeight || 0;
-      const bt = bottomTrackRef.current?.offsetHeight || 0;
-      const ls = lowerStatusRef.current?.offsetHeight || 0;
-      // 24 = workspace padding (12px top + 12px bottom)
-      // 12 = workspace gap between sidebar and right column
-      // 24 = additional buffer for margins
-      const workspacePaddingAndGap = 24 + 12; // = 36px
-      const additionalBuffer = 24;
-      const gap = workspacePaddingAndGap + additionalBuffer; // = 60px total
-      const available = Math.max(window.innerHeight - hh - th - bt - ls - gap, 220);
-      setViewerHeight(available);
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, []);
+  // Removed manual measurement and resize handlers. Layout now uses CSS flexbox and
+  // relative sizing so panels remain stable during window resize.
 
   return (
     <div className={`min-h-screen overflow-hidden select-none ${showMainApp ? 'bg-neutral-100' : 'bg-white'}`}>

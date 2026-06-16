@@ -249,3 +249,75 @@ input[type=range].custom-slider::-moz-range-track {
   cursor: pointer;
   background: transparent;
 }
+
+/* Navigation hover scale - subtle military-style */
+.nav-item-hover {
+  transform-origin: left center;
+  transition: transform 200ms cubic-bezier(.2,.9,.2,1);
+}
+.nav-item-hover:hover {
+  transform: scale(1.10);
+}
+
+/* Viewer toolbar responsive tweaks: keep single row, allow horizontal scroll on very small screens */
+#viewer_toolbar {
+  overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+  #viewer_toolbar .win-btn, #viewer_toolbar .win-btn-blue {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  #viewer_toolbar { gap: 6px; }
+}
+
+@media (max-width: 640px) {
+  #viewer_toolbar .win-btn, #viewer_toolbar .win-btn-blue {
+    padding: 5px 6px;
+    font-size: 11px;
+  }
+}
+
+/* Viewer toolbar grouping: ensure groups wrap as units and left-align when wrapped */
+#viewer_toolbar { align-content: flex-start; }
+.viewer-toolbar-group { flex-shrink: 0; display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.viewer-toolbar-group.flex-grow { flex: 1 1 auto; }
+
+@media (max-width: 700px) {
+  /* Allow groups to stack but stay left-aligned */
+  #viewer_toolbar { gap: 8px; }
+  .viewer-toolbar-group { margin-right: 8px; }
+}
+
+/* Hover information drawer */
+.nav-hover-drawer {
+  position: absolute;
+  z-index: 60;
+  min-width: 220px;
+  max-width: 320px;
+  background: #ffffff;
+  border: 1px solid var(--app-border);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #0f172a;
+  border-radius: 6px;
+  transition: opacity 160ms ease, transform 160ms ease;
+  opacity: 0;
+  pointer-events: none;
+}
+.nav-hover-drawer.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+.nav-hover-drawer .title {
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 4px;
+  color: #0ea5e9;
+}
+.nav-hover-drawer .desc {
+  line-height: 1.25;
+  color: #1f2937;
+}

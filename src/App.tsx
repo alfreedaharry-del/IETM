@@ -32,31 +32,23 @@ import {
   Image,
   Network
 } from 'lucide-react';
-import { 
-  DOCUMENT_STRUCTURE, 
-  PAGES_DATABASE, 
-  MANUALS_INFO, 
-  ManualPage, 
-  DocumentSection 
-} from './data';
+import { PAGES_DATABASE, ManualPage, DocumentSection } from './data';
 import { EngineeringDiagram } from './components/EngineeringDiagram';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 // Asset URLs via Vite's import meta URL to ensure correct production paths
 const logoImg = new URL('./assets/images/logo-1.png', import.meta.url).href;
-const pdfUserHandbook = new URL('./assets/pdf/st1.pdf', import.meta.url).href;
-const pdfTech_1_1 = new URL('./assets/pdf/st2.pdf', import.meta.url).href;
-const pdfTech_1_2 = new URL('./assets/pdf/st3.pdf', import.meta.url).href;
+const logoWebp = new URL('./assets/images/logo.webp', import.meta.url).href;
+const phoneImg = new URL('./assets/images/phone.webp', import.meta.url).href;
+const headerBg = new URL('./assets/images/header.webp', import.meta.url).href;
+const PDF_BASE_WIDTH = 500; // increased base width for larger default PDF view
 
 // Configure the worker to use the local module via Vite's URL handling for deployment stability
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const PDF_MAPPING: Record<string, string> = {
-  'user-handbook': pdfUserHandbook,
-  'tech-1-1': pdfTech_1_1,
-  'tech-1-2': pdfTech_1_2
-};
+// PDF mappings and document structure are loaded at runtime from
+// `src/assets/config/documents.xml` and PDF files under `src/assets/pdf/`.
 
 interface PdfPageRendererProps {
   pdfDoc: any;
@@ -252,7 +244,56 @@ const pageVariants = {
 export default function App() {
   // Global Navigation State
   const [showMainApp, setShowMainApp] = useState<boolean>(false);
-  const [activeManualId, setActiveManualId] = useState<string>('user-handbook');
+  const [activeManualId, setActiveManualId] = useState<string>('');
+  const [documentStructure, setDocumentStructure] = useState<DocumentSection[]>([]);
+  const [pdfMapping, setPdfMapping] = useState<Record<string, string>>({});
+  const [manualsInfo, setManualsInfo] = useState<Record<string, { title: string; pagesCount: number; startPage: number }>>({});
+  const navPanelRef = useRef<HTMLDivElement | null>(null);
+
+  // Hover drawer & speech state
+  const [hoverInfo, setHoverInfo] = useState<null | { id: string; title: string; desc: string; top: number; left: number }>(null);
+  const [spokenId, setSpokenId] = useState<string | null>(null);
+
+  const HOVER_DESCRIPTIONS: Record<string, string> = {
+    'user-handbook': 'General operating instructions, safety guidance, and basic system usage procedures.',
+    'tech-manual-1': 'Technical reference documentation and detailed engineering information.',
+    'tech-1-1': 'System architecture, functionality, specifications, and operational characteristics.',
+    'tech-1-2': 'Engineering drawings, layouts, diagrams, and technical illustrations.',
+    'tech-manual-2': 'Scheduled maintenance procedures, inspections, and servicing requirements.',
+    'tech-2': 'Scheduled maintenance procedures, inspections, and servicing requirements.',
+    'tech-manual-3': 'Overhaul procedures, restoration activities, and major component servicing.',
+    'tech-3': 'Overhaul procedures, restoration activities, and major component servicing.',
+    'tech-4-1': 'Component identification, part references, and equipment breakdown structure.',
+    'tech-4-2': 'Visual references, exploded views, and supporting graphical information.',
+    'product-tree': 'System hierarchy, assemblies, subassemblies, and product structure relationships.'
+  };
+
+  // Speak description once per hover entry
+  const speakDescription = (id: string, text: string) => {
+    try {
+      if (!text || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+      // Stop previous speech
+      window.speechSynthesis.cancel();
+      setSpokenId(id);
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US';
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) || voices[0];
+      if (preferred) u.voice = preferred;
+      // Speak
+      window.speechSynthesis.speak(u);
+    } catch (err) {
+      console.error('Speech error:', err);
+    }
+  };
+
+  const clearHover = () => {
+    setHoverInfo(null);
+    setSpokenId(null);
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
   
   // Navigation Section Expand/Collapse State - empty map so all sections remain collapsed by default
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -276,7 +317,7 @@ export default function App() {
 
   // PDF Viewer View State
   const [viewMode, setViewMode] = useState<'single' | 'double'>('double');
-  const [zoomLevel, setZoomLevel] = useState<number>(100); 
+  const [zoomLevel, setZoomLevel] = useState<number>(140); 
   const [currentPairIndex, setCurrentPairIndex] = useState<number>(0);
   const [currentPageIndex, setCurrentPageIndex] = useState<number>(0);
   const [direction, setDirection] = useState<'next' | 'prev'>('next');
@@ -314,7 +355,7 @@ export default function App() {
   const [pdfDocsMap, setPdfDocsMap] = useState<Record<string, any>>({});
   const [loadingManuals, setLoadingManuals] = useState<Record<string, boolean>>({});
 
-  const isPdfManual = PDF_MAPPING[activeManualId] !== undefined;
+  const isPdfManual = pdfMapping[activeManualId] !== undefined;
   
   // Ref to the scroll container to manage clicking and tracking page positions
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -336,6 +377,106 @@ export default function App() {
 
   // Generate systemic clock for status bar
   useEffect(() => {
+    // Load XML configuration mapping documents to PDF files
+    const loadConfig = async () => {
+      try {
+        const cfgUrl = new URL('./assets/config/documents.xml', import.meta.url).href;
+        const resp = await fetch(cfgUrl);
+        if (!resp.ok) return;
+        const xmlText = await resp.text();
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(xmlText, 'application/xml');
+
+        const newStructure: DocumentSection[] = [];
+        const newPdfMap: Record<string, string> = {};
+        const newManualsInfo: Record<string, { title: string; pagesCount: number; startPage: number }> = {};
+
+        const sections = Array.from(xml.querySelectorAll('section'));
+        console.log('[DOCS] Parsed XML sections count:', sections.length);
+        for (const s of sections) {
+          console.log('[DOCS] Section node:', { id: s.getAttribute('id'), title: s.getAttribute('title'), file: s.getAttribute('file') });
+          const sid = s.getAttribute('id') || '';
+          const stitle = s.getAttribute('title') || sid;
+          const file = s.getAttribute('file');
+
+          const subdocs = Array.from(s.querySelectorAll('subdocument'));
+          if (subdocs.length > 0) {
+            console.log('[DOCS] Found subdocuments for section', sid, 'count:', subdocs.length);
+            const subs: any[] = [];
+            for (const sd of subdocs) {
+              console.log('[DOCS] Subdocument node:', { id: sd.getAttribute('id'), title: sd.getAttribute('title'), file: sd.getAttribute('file') });
+              const subId = sd.getAttribute('id') || '';
+              const subTitle = sd.getAttribute('title') || subId;
+              const subFile = sd.getAttribute('file') || '';
+              subs.push({ id: subId, title: subTitle, docId: subId });
+              try {
+                newPdfMap[subId] = new URL(`./assets/pdf/${encodeURIComponent(subFile)}`, import.meta.url).href;
+              } catch (e) {
+                // fallback: try without encoding
+                newPdfMap[subId] = new URL(`./assets/pdf/${subFile}`, import.meta.url).href;
+              }
+              newManualsInfo[subId] = { title: subTitle, pagesCount: 0, startPage: 1 };
+            }
+            newStructure.push({ id: sid, title: stitle, isExpandable: true, subDocuments: subs });
+          } else if (file) {
+            // Single-file section
+            try {
+              newPdfMap[sid] = new URL(`./assets/pdf/${encodeURIComponent(file)}`, import.meta.url).href;
+            } catch (e) {
+              newPdfMap[sid] = new URL(`./assets/pdf/${file}`, import.meta.url).href;
+            }
+            newManualsInfo[sid] = { title: stitle, pagesCount: 0, startPage: 1 };
+            newStructure.push({ id: sid, title: stitle, isExpandable: false, docId: sid });
+          }
+        }
+
+        // Log generated structures for debugging
+        console.log('[DOCS] Generated documentStructure:', newStructure);
+        console.log('[DOCS] Generated pdfMapping (keys):', Object.keys(newPdfMap));
+        console.log('[DOCS] Generated pdfMapping (sample):', Object.entries(newPdfMap).slice(0,20));
+
+        setDocumentStructure(newStructure);
+        setPdfMapping(newPdfMap);
+        setManualsInfo(newManualsInfo);
+
+        // Verify that the mapped URLs resolve (HEAD request) and log results
+        for (const [k, url] of Object.entries(newPdfMap)) {
+          if (!url) {
+            console.warn('[DOCS] pdfMapping entry has falsy URL for key:', k);
+            continue;
+          }
+          fetch(url, { method: 'HEAD' })
+            .then(r => {
+              console.log(`[DOCS] HEAD ${k} -> ${url} status:`, r.status);
+              if (!r.ok) console.warn(`[DOCS] HEAD check failed for ${k}: ${url}`);
+            })
+            .catch(err => console.error('[DOCS] HEAD check error for', k, url, err));
+        }
+
+        // Create simple alias keys to support legacy manualId naming in PAGES_DATABASE
+        for (const sid of Object.keys(newPdfMap)) {
+          const m = sid.match(/^tech-manual-(\d+)$/);
+          if (m) {
+            const alias = `tech-${m[1]}`;
+            if (!newPdfMap[alias]) {
+              newPdfMap[alias] = newPdfMap[sid];
+              console.log('[DOCS] Created alias pdfMapping key:', alias, '->', sid);
+            }
+          }
+        }
+
+        // Default active manual to first found docId if none selected yet
+        if (!activeManualId) {
+          const firstDoc = (Object.keys(newPdfMap)[0]) || '';
+          if (firstDoc) setActiveManualId(firstDoc);
+        }
+      } catch (err) {
+        console.error('Failed to load documents XML config:', err);
+      }
+    };
+
+    loadConfig();
+
     const updateTime = () => {
       const now = new Date();
       setSystemTime(now.toLocaleTimeString());
@@ -407,8 +548,14 @@ export default function App() {
 
   // Back-end PDF parsing and loading effect
   useEffect(() => {
-    const pdfUrl = PDF_MAPPING[activeManualId];
-    if (!pdfUrl) return;
+    console.log('[DOCS] useEffect: activeManualId changed ->', activeManualId);
+    console.log('[DOCS] current pdfMapping keys:', Object.keys(pdfMapping));
+    const pdfUrl = pdfMapping[activeManualId];
+    console.log('[DOCS] resolved pdfUrl for', activeManualId, ':', pdfUrl);
+    if (!pdfUrl) {
+      console.warn('[DOCS] No pdfUrl found for activeManualId:', activeManualId);
+      return;
+    }
 
     if (pdfPagesMap[activeManualId]) return;
 
@@ -505,6 +652,8 @@ export default function App() {
 
   // When changing active manual, reset page views and clear search
   const handleSelectManual = (manualId: string) => {
+    console.log('[DOCS] handleSelectManual clicked:', manualId, 'pdfMapping has key?', Object.prototype.hasOwnProperty.call(pdfMapping, manualId));
+    console.log('[DOCS] pdfMapping value:', pdfMapping[manualId]);
     setActiveManualId(manualId);
     setCurrentPageIndex(0);
     setCurrentPairIndex(0);
@@ -519,6 +668,24 @@ export default function App() {
     if (scrollContainerRef.current) {
       scrollContainerRef.current.scrollTop = 0;
       scrollContainerRef.current.scrollLeft = 0;
+    }
+  };
+
+  const handleHoverEnter = (e: React.MouseEvent, id: string | undefined, title: string) => {
+    if (!id) return;
+    const panel = navPanelRef.current;
+    const target = e.currentTarget as HTMLElement;
+    if (!panel || !target) return;
+    const panelRect = panel.getBoundingClientRect();
+    const rect = target.getBoundingClientRect();
+    const top = rect.top - panelRect.top + rect.height + 8; // position below the item
+    const left = Math.min(panelRect.width - 20, rect.left - panelRect.left + 36);
+    const desc = HOVER_DESCRIPTIONS[id] || HOVER_DESCRIPTIONS[title.toLowerCase()] || manualsInfo[id]?.title || '';
+
+    setHoverInfo({ id, title, desc, top, left });
+    // speak once per enter
+    if (spokenId !== id && desc) {
+      speakDescription(id, desc);
     }
   };
 
@@ -862,41 +1029,30 @@ export default function App() {
       {/* LEFT SIDE - Product Image only (about 40-45% of page width) */}
       <div className="w-[42%] flex items-center justify-center p-8 bg-white border-none shrink-0">
         <img 
-          src={logoImg} 
-          alt="ELCOM Innovations Logo" 
-          className="max-h-[75vh] w-auto object-contain border-none shadow-none"
+          src={phoneImg} 
+          alt="Product Image" 
+          className="max-h-[80vh] w-auto object-contain border-none shadow-none"
           referrerPolicy="no-referrer"
+          style={{ display: 'block' }}
         />
       </div>
 
       {/* RIGHT SIDE - Corporate & IETM information (vertically and center aligned) */}
-      <div className="flex-1 flex flex-col justify-center items-center p-12 pr-16 bg-white text-center space-y-8 select-text border-none">
-        <div className="flex flex-col items-center">
-          <h1 className="text-5xl sm:text-6xl font-bold tracking-tight text-[#0ea5e9] font-sans">
-            ELCOM Innovations
-          </h1>
-          <a 
-            href="http://www.elcominnovations.com" 
-            target="_blank" 
-            rel="noopener noreferrer" 
-            className="text-lg text-black mt-2 inline-block font-sans hover:underline font-medium"
-          >
-            www.elcominnovations.com
-          </a>
-        </div>
+      <div className="flex-1 flex flex-col justify-center items-center p-12 pr-16 bg-white text-center space-y-4 select-text border-none">
+        {/* Right column: logo at top, then website and text content centered below */}
+        <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(56px, 9vw, 120px)', whiteSpace: 'nowrap' }} />
 
-        <div className="space-y-4 pt-6 border-t border-neutral-100 w-full max-w-lg flex flex-col items-center">
-          <h2 className="text-3xl font-bold text-black tracking-tight font-sans">
-            Interactive Electronic Technical Manual (IETM)
-          </h2>
-          <p className="text-xl text-black font-medium leading-relaxed font-sans">
-            Field Telephone Set with Magneto and Auto Mode
-          </p>
-          
-          <div className="pt-4 space-y-1.5 text-lg text-black font-medium font-sans">
-            <div>Make - ELCOM</div>
-            <div>Model - RFT1001</div>
-          </div>
+        <div style={{ width: '100%', maxWidth: 720 }} className="flex flex-col items-center text-center space-y-3">
+          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(13px, 1.8vw, 18px)' }}>www.elcominnovations.com</a>
+
+          <h2 className="font-black" style={{ fontSize: 'clamp(20px, 2.6vw, 30px)', whiteSpace: 'nowrap', margin: 0 }}>Interactive Electronic Technical Manual (IETM)</h2>
+
+          <div style={{ fontStyle: 'italic', fontSize: 'clamp(12px, 1.4vw, 14px)', whiteSpace: 'nowrap' }}>for</div>
+
+          <div className="font-semibold" style={{ fontSize: 'clamp(16px, 2.0vw, 22px)', whiteSpace: 'nowrap' }}>Field Telephone Set with Magneto and Auto Mode (RFT1001)</div>
+
+          <div style={{ fontSize: 'clamp(13px, 1.6vw, 16px)', whiteSpace: 'nowrap' }}>Make: Elcom Innovations Pvt Ltd</div>
+          <div style={{ fontSize: 'clamp(13px, 1.6vw, 16px)', whiteSpace: 'nowrap' }}>Model: RFT1001</div>
         </div>
       </div>
 
@@ -958,7 +1114,9 @@ export default function App() {
             {/* Explorable folder row header */}
             <div 
               onClick={() => toggleSection(node.id)}
-              className="flex items-center gap-2.5 py-1.5 pl-3 pr-2.5 rounded hover:bg-neutral-50 cursor-pointer text-neutral-800 font-semibold transition-colors border-l-2 border-transparent"
+              onMouseEnter={(e) => handleHoverEnter(e as React.MouseEvent, node.id, node.title)}
+              onMouseLeave={() => clearHover()}
+              className="nav-item-hover flex items-center gap-2.5 py-1.5 pl-3 pr-2.5 rounded hover:bg-neutral-50 cursor-pointer text-neutral-800 font-semibold transition-colors border-l-2 border-transparent"
             >
               {getNodeIcon(node.id)}
               <span className="truncate font-sans text-[13px]">{node.title}</span>
@@ -973,7 +1131,9 @@ export default function App() {
                     <div 
                       key={subDoc.id}
                       onClick={() => handleSelectManual(subDoc.docId)}
-                      className={`flex items-center gap-2.5 py-1.5 pr-2.5 pl-9 rounded cursor-pointer text-[13px] transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 border-l-2 border-transparent'}`}
+                      onMouseEnter={(e) => handleHoverEnter(e as React.MouseEvent, subDoc.docId, subDoc.title)}
+                      onMouseLeave={() => clearHover()}
+                      className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-9 rounded cursor-pointer text-[13px] transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 border-l-2 border-transparent'}`}
                     >
                       {getNodeIcon(subDoc.id)}
                       <span className="truncate font-sans" title={subDoc.title}>{subDoc.title}</span>
@@ -991,7 +1151,9 @@ export default function App() {
           <div key={node.id} className="text-left select-none text-sm">
             <div 
               onClick={() => node.docId && handleSelectManual(node.docId)}
-              className={`flex items-center gap-2.5 py-1.5 pr-2.5 pl-3 rounded cursor-pointer font-semibold transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-700 hover:bg-neutral-50 border-l-2 border-transparent'}`}
+              onMouseEnter={(e) => handleHoverEnter(e as React.MouseEvent, node.docId || node.id, node.title)}
+              onMouseLeave={() => clearHover()}
+              className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-3 rounded cursor-pointer font-semibold transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-700 hover:bg-neutral-50 border-l-2 border-transparent'}`}
             >
               {node.docId ? getNodeIcon(node.docId) : getNodeIcon(node.id)}
               <span className="truncate font-sans text-[13px]" title={node.title}>{node.title}</span>
@@ -1007,45 +1169,39 @@ export default function App() {
       <div id="main_ietm_interface" className="h-screen w-screen flex flex-col bg-neutral-100 font-sans overflow-hidden">
         
         {/* FIXED TOP WINDOW TITLE BAR - MODERN ENTERPRISE HEADER */}
-        <div id="retro_top_header" className="relative overflow-hidden bg-gradient-to-r from-[#bae6fd] via-[#7dd3fc] to-[#38bdf8] text-[#000000] px-4 py-6 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50">
+        <div id="retro_top_header" className="relative overflow-hidden text-[#000000] px-4 py-6 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50" style={{ backgroundImage: `url('${headerBg}')`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
           {/* Subtle Technical/Engineering Blueprints Grid Mesh */}
           <div className="absolute inset-0 opacity-[0.20] pointer-events-none mix-blend-multiply" style={{ 
             backgroundImage: 'radial-gradient(circle, #0284c7 1px, transparent 1px), linear-gradient(to right, rgba(14,165,233,0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(14,165,233,0.18) 1px, transparent 1px)', 
             backgroundSize: '18px 18px',
             backgroundPosition: 'center center'
           }}></div>
-          <div className="flex items-center gap-3 relative z-10">
-            <img src={logoImg} alt="ELCOM Innovations Logo" className="h-8 w-auto object-contain" />
-            <div className="text-left font-sans">
-              <span className="block leading-none text-sm font-bold tracking-wide uppercase text-[#000000]">ELCOM Innovations</span>
+          <div className="flex items-center gap-3 relative z-10" style={{ minWidth: 72 }}>
+            <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(28px, 4.5vw, 50px)', minHeight: 28, minWidth: 28 }} />
+          </div>
+
+          <div className="text-center font-sans relative z-10 flex-1" style={{ minWidth: 0 }}>
+            <h1 className="font-black uppercase leading-tight text-center" style={{ fontSize: 'clamp(16px, 1.8vw, 28px)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Field Telephone Set with Magneto and Auto Mode (RFT1001)
+            </h1>
+            <div className="text-sm tracking-widest mt-1 text-center uppercase" style={{ fontSize: 'clamp(10px, 1.2vw, 13px)' }}>
+              INTERACTIVE ELECTRONIC TECHNICAL MANUAL
             </div>
           </div>
 
-          <div className="text-center font-sans hidden sm:block relative z-10">
-            <span className="text-2xl sm:text-3xl font-black tracking-widest uppercase leading-none block text-[#000000] font-sans drop-shadow-sm">
-              Interactive Electronic Technical Manual
-            </span>
-            <span className="text-sm text-[#000000] block mt-1.5 tracking-widest font-mono font-bold opacity-80">
-              RFT1001
-            </span>
-          </div>
-
-          {/* Right spacer to keep title perfectly centered */}
-          <div className="w-5 h-5 hidden sm:block relative z-10"></div>
-        </div>
-
-        {/* INNER MENUBAR */}
-        <div className="bg-white border-b border-neutral-200 px-4 py-2 text-sm flex gap-4 select-none justify-between shrink-0 font-sans text-left items-center shadow-sm">
-          <div className="flex gap-4">
-            <span className="cursor-pointer hover:text-sky-600 text-neutral-600 font-semibold transition-colors" onClick={() => setShowMainApp(false)}>Back</span>
+          {/* Version top-right */}
+          <div className="relative z-10 text-right" style={{ minWidth: 120 }}>
+            <div className="text-xs font-mono text-[#0ea5e9] font-semibold">RFT1001 IETM v1.10</div>
           </div>
         </div>
+
+        {/* INNER MENUBAR removed per requirements */}
 
         {/* WORKSPACE ZONE (SPLIT: NAVIGATION & VIEWING CONTAINER) */}
         <div className="flex-grow flex flex-row overflow-hidden min-h-0 bg-neutral-100 p-3 gap-3">
           
           {/* LEFT COLUMN: NAVIGATION EXPLORER PANEL */}
-          <div id="left_nav_panel" className="w-[300px] shrink-0 flex flex-col bg-white border border-neutral-200 rounded-lg p-3 shadow-sm">
+          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }}>
             <div className="text-[#0ea5e9] text-sm font-bold font-sans tracking-wide border-b border-neutral-100 pb-2 mb-3 uppercase flex items-center gap-2">
               <span className="w-1.5 h-3 bg-[#0ea5e9] rounded-sm inline-block"></span>
               <span>Document Explorer</span>
@@ -1053,14 +1209,27 @@ export default function App() {
             
             {/* Explorable scrollable tree box */}
             <div className="flex-grow overflow-y-auto pr-1 space-y-1">
-              {DOCUMENT_STRUCTURE.map(node => renderTreeItem(node))}
+              {documentStructure.map(node => renderTreeItem(node))}
             </div>
+
+            {/* Hover info drawer rendered inside nav panel */}
+            {hoverInfo && (
+              <div
+                className={`nav-hover-drawer show`}
+                style={{ top: hoverInfo.top, left: hoverInfo.left }}
+                role="tooltip"
+                aria-live="polite"
+              >
+                <div className="title">{hoverInfo.title}</div>
+                <div className="desc">{hoverInfo.desc}</div>
+              </div>
+            )}
 
             {/* Quick terminal quick-stats overview */}
             <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-3 p-3 text-xs font-sans text-left text-neutral-600 space-y-1.5">
               <span className="font-bold text-neutral-800 border-b border-neutral-100 block pb-1 mb-1.5 text-xs uppercase tracking-wider">Active Document</span>
-              <div className="text-[#0ea5e9] truncate font-semibold text-[13px]" title={MANUALS_INFO[activeManualId]?.title}>
-                {MANUALS_INFO[activeManualId]?.title}
+              <div className="text-[#0ea5e9] truncate font-semibold text-[13px]" title={manualsInfo[activeManualId]?.title}>
+                {manualsInfo[activeManualId]?.title}
               </div>
               <div className="flex justify-between text-xs pt-1">
                 <span className="text-neutral-500">Total Pages:</span>
@@ -1084,9 +1253,11 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
             
             {/* VIEWING TOOLBAR - TOP POSITION */}
-            <div id="viewer_toolbar" className="bg-white border border-neutral-200 rounded-lg p-2 gap-3 flex flex-wrap items-center justify-between shrink-0 mb-3 shadow-sm font-sans">
+            <div id="viewer_toolbar" className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-between shrink-0 mb-3 shadow-sm font-sans overflow-hidden" style={{ alignContent: 'flex-start' }}>
+              {/* GROUP 1: Prev / Page / Next */}
+              <div className="viewer-toolbar-group flex items-center gap-2">
               
-              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2">
                 {/* Prev Button */}
                 <button 
                   id="prev_page_btn"
@@ -1103,7 +1274,7 @@ export default function App() {
                 <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded min-w-[140px] select-none text-center">
                   {viewMode === 'single' 
                     ? currentManualPages[currentPageIndex]?.pageNumber || ''
-                    : `page ${currentManualPages[currentPairIndex * 2]?.pageNumber || ''}-${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber || currentManualPages[currentPairIndex * 2]?.pageNumber || ''}`
+                    : `Page ${currentManualPages[currentPairIndex * 2]?.pageNumber || ''}-${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber || currentManualPages[currentPairIndex * 2]?.pageNumber || ''}`
                   }
                 </div>
 
@@ -1118,9 +1289,11 @@ export default function App() {
                   <span className="hidden sm:inline">Next</span>
                   <ArrowRight size={13} />
                 </button>
+                </div>
               </div>
 
-              <div className="flex items-center gap-3 flex-wrap">
+              {/* GROUP 2: View Mode (Single/Double) */}
+              <div className="viewer-toolbar-group flex items-center gap-3">
                 {/* View Mode Selection Control */}
                 <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm h-8 select-none font-sans bg-white items-center">
                   <button 
@@ -1139,10 +1312,12 @@ export default function App() {
                     Double Page
                   </button>
                 </div>
+              </div>
 
-                {/* Zoom display adjust */}
+              {/* GROUP 3: Zoom controls + Reset */}
+              <div className="viewer-toolbar-group flex items-center gap-2">
                 <div className="flex items-center gap-1.5 font-sans">
-                  <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom:</span>
+                  <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom</span>
                   <button 
                     onClick={handleZoomOut}
                     disabled={zoomLevel <= 25}
@@ -1164,7 +1339,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Reset Zoom Button */}
                 <button 
                   id="reset_zoom_btn"
                   onClick={handleResetZoom}
@@ -1177,7 +1351,7 @@ export default function App() {
               </div>
 
               {/* Search function input field */}
-              <div className="flex items-center gap-2 flex-grow max-w-sm">
+              <div className="viewer-toolbar-group flex items-center gap-2 flex-grow max-w-sm">
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1.5 flex-grow">
                   <div className="relative flex-grow">
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
@@ -1239,7 +1413,7 @@ export default function App() {
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }}
-                className={`flex-grow overflow-auto p-4 relative flex select-none bg-[#edf0f2] ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
+                className={`flex-grow overflow-auto p-2 relative flex select-none bg-[#edf0f2] ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
                 style={{ 
                   scrollbarGutter: 'stable',
                   perspective: 1500
@@ -1289,9 +1463,9 @@ export default function App() {
                           <div 
                             className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
                             style={isPdfManual ? { 
-                              width: `${385 * (zoomLevel / 100)}px`
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
                             } : { 
-                              width: `${385 * (zoomLevel / 100)}px`, 
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
                               minHeight: `${540 * (zoomLevel / 100)}px`,
                               boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
                             }}
@@ -1315,7 +1489,7 @@ export default function App() {
                                           ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPageIndex].pageNumber).length
                                           : -1
                                       }
-                                      width={385}
+                                      width={PDF_BASE_WIDTH}
                                       padding={0}
                                     />
                                     {/* OCR text overlay */}
@@ -1427,9 +1601,9 @@ export default function App() {
                           <div 
                             className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
                             style={isPdfManual ? { 
-                              width: `${385 * (zoomLevel / 100)}px`
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
                             } : { 
-                              width: `${385 * (zoomLevel / 100)}px`, 
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
                               minHeight: `${540 * (zoomLevel / 100)}px`,
                               boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
                             }}
@@ -1453,7 +1627,7 @@ export default function App() {
                                           ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPairIndex * 2].pageNumber).length
                                           : -1
                                       }
-                                      width={385}
+                                      width={PDF_BASE_WIDTH}
                                       padding={0}
                                     />
                                     {/* OCR text overlay */}
@@ -1553,9 +1727,9 @@ export default function App() {
                           <div 
                             className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
                             style={isPdfManual ? { 
-                              width: `${385 * (zoomLevel / 100)}px`
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
                             } : { 
-                              width: `${385 * (zoomLevel / 100)}px`, 
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
                               minHeight: `${540 * (zoomLevel / 100)}px`,
                               boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
                             }}
@@ -1579,7 +1753,7 @@ export default function App() {
                                           ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPairIndex * 2 + 1].pageNumber).length
                                           : -1
                                       }
-                                      width={385}
+                                      width={PDF_BASE_WIDTH}
                                       padding={0}
                                     />
                                     {/* OCR text overlay */}
@@ -1677,7 +1851,7 @@ export default function App() {
                           <div 
                             className="bg-gray-400/20 border border-neutral-200 flex items-center justify-center text-gray-400 font-mono text-xs rounded-md shadow-md"
                             style={{ 
-                              width: `${385 * (zoomLevel / 100)}px`, 
+                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
                               minHeight: `${540 * (zoomLevel / 100)}px` 
                             }}
                           >
@@ -1694,7 +1868,7 @@ export default function App() {
             </div>
 
             {/* BOTTOM HORIZONTAL DRAGGABLE RAPID-NAVIGATION TRACK */}
-            <div className="bg-white border-t border-neutral-200 px-4 py-2 mx-1 mb-2 shadow-sm select-none font-sans shrink-0">
+            <div className="bg-white border-t border-neutral-200 px-3 py-1.5 mx-1 mb-2 shadow-sm select-none font-sans shrink-0">
               <div className="relative w-full h-[12px] flex items-center">
                 {/* Unfilled background track */}
                 <div className="absolute inset-x-0 h-[3px] bg-neutral-200 rounded-full pointer-events-none" />
@@ -1740,9 +1914,9 @@ export default function App() {
             </div>
 
             {/* LOWER STATUS STRIP */}
-            <div id="lower_status_bar" className="bg-neutral-50 border-t border-neutral-200 p-2.5 flex justify-end font-sans text-xs text-neutral-500 shrink-0 select-none rounded-b-lg">
+            <div id="lower_status_bar" className="bg-neutral-50 border-t border-neutral-200 p-1.5 flex justify-end font-sans text-xs text-neutral-500 shrink-0 select-none rounded-b-lg">
               <div className="border border-neutral-200 rounded-md bg-white px-3 py-1 font-bold text-[#0ea5e9] shadow-sm flex items-center">
-                RFT1001 IETM v1.20
+                {/* footer version removed per requirements */}
               </div>
             </div>
 
@@ -1753,6 +1927,15 @@ export default function App() {
       </div>
     );
   };
+
+  // Cancel speech on unmount and ensure no overlapping speech
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try { window.speechSynthesis.cancel(); } catch (e) {}
+      }
+    };
+  }, []);
 
   return (
     <div className={`min-h-screen overflow-hidden select-none ${showMainApp ? 'bg-neutral-100' : 'bg-white'}`}>

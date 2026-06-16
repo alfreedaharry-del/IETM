@@ -26,77 +26,9 @@ export interface DocumentSection {
   }[];
 }
 
-export const DOCUMENT_STRUCTURE: DocumentSection[] = [
-  {
-    id: 'user-handbook',
-    title: '1. User Handbook',
-    isExpandable: false,
-    docId: 'user-handbook'
-  },
-  {
-    id: 'tech-manual-1',
-    title: '2. Tech Manual Part 1',
-    isExpandable: true,
-    subDocuments: [
-      {
-        id: 't1v1',
-        title: 'Tech Info Tech Description (Vol 1/1)',
-        docId: 'tech-1-1'
-      },
-      {
-        id: 't1v2',
-        title: 'Tech Info Drawings (Vol 2/2)',
-        docId: 'tech-1-2'
-      }
-    ]
-  },
-  {
-    id: 'tech-manual-2',
-    title: '3. Tech Manual Part 2 Maintenance',
-    isExpandable: false,
-    docId: 'tech-2'
-  },
-  {
-    id: 'tech-manual-3',
-    title: '4. Tech Manual Part 3 Overhauling',
-    isExpandable: false,
-    docId: 'tech-3'
-  },
-  {
-    id: 'tech-manual-4',
-    title: '5. Tech Manual Part 4',
-    isExpandable: true,
-    subDocuments: [
-      {
-        id: 't4v1',
-        title: 'Part List (Vol 1/2)',
-        docId: 'tech-4-1'
-      },
-      {
-        id: 't4v2',
-        title: 'Illustrations (Vol 2/2)',
-        docId: 'tech-4-2'
-      }
-    ]
-  },
-  {
-    id: 'product-tree-section',
-    title: '6. Product Tree',
-    isExpandable: false,
-    docId: 'product-tree'
-  }
-];
-
-export const MANUALS_INFO: Record<string, { title: string; pagesCount: number; startPage: number }> = {
-  'user-handbook': { title: 'USER HANDBOOK - FIELD TELEPHONE RFT1001', pagesCount: 10, startPage: 1 },
-  'tech-1-1': { title: 'TECHNICAL MANUAL - TECHNICAL DESCRIPTION (VOL 1/1)', pagesCount: 10, startPage: 11 },
-  'tech-1-2': { title: 'TECHNICAL MANUAL - DIAGRAMS & DRAWINGS (VOL 2/2)', pagesCount: 8, startPage: 21 },
-  'tech-2': { title: 'TECHNICAL MANUAL - MAINTENANCE PROCEDURES (PART 2)', pagesCount: 10, startPage: 29 },
-  'tech-3': { title: 'TECHNICAL MANUAL - OVERHAULING PROCEDURES (PART 3)', pagesCount: 10, startPage: 39 },
-  'tech-4-1': { title: 'PARTS LIST & COMPONENT CATALOGUE (VOL 1/2)', pagesCount: 6, startPage: 49 },
-  'tech-4-2': { title: 'ILLUSTRATED ELECTRICAL & PHYSICAL PARTS (VOL 2/2)', pagesCount: 6, startPage: 55 },
-  'product-tree': { title: 'RFT1001 PRODUCT BREAKDOWN TREE', pagesCount: 4, startPage: 61 }
-};
+// DOCUMENT_STRUCTURE and MANUALS_INFO are now provided dynamically by the XML
+// configuration in `src/assets/config/documents.xml`. This file keeps only
+// the shared types and the internal PAGES_DATABASE used by non-PDF content.
 
 export const PAGES_DATABASE: ManualPage[] = [
   // ==================== USER HANDBOOK (Pages 1 to 10) ====================

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<documents>
+  <!-- Top-level sections. Each section may have either a `file` attribute (single PDF)
+       or contain `subdocument` children for multiple PDFs. The `id` is the internal
+       docId and should be unique. Filenames are relative to src/assets/pdf/ -->
+
+  <section id="user-handbook" title="USER HANDBOOK" file="user_manual.pdf" />
+
+  <section id="tech-manual-1" title="TECH MANUAL PART 1">
+    <subdocument id="tech-1-1" title="TECH DESCRIPTION" file="tech_description.pdf" />
+    <subdocument id="tech-1-2" title="TECH INFO DRAWINGS VOL (2/2)" file="drawings.pdf" />
+  </section>
+
+  <section id="tech-manual-2" title="TECH MANUAL PART 2" file="maintainance.pdf" />
+
+  <section id="tech-manual-3" title="TECH MANUAL PART 3" file="overhauling.pdf" />
+
+  <section id="tech-manual-4" title="TECH MANUAL PART 4">
+    <subdocument id="tech-4-1" title="Part List Vol1/2" file="part_list.pdf" />
+    <subdocument id="tech-4-2" title="Illustrations Vol2/2" file="illustrations.pdf" />
+  </section>
+
+  <section id="product-tree" title="PRODUCT TREE" file="project_structure.pdf" />
+</documents>

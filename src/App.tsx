@@ -1258,9 +1258,9 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
             
             {/* VIEWING TOOLBAR - TOP POSITION */}
-            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex items-center justify-between shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-start shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
               {/* GROUP 1: Prev / Page / Next */}
-              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 0 auto' }}>
+              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
               
                 <div className="flex items-center gap-2">
                 {/* Prev Button */}
@@ -1298,7 +1298,7 @@ export default function App() {
               </div>
 
               {/* GROUP 2: View Mode (Single/Double) */}
-              <div className="viewer-toolbar-group flex items-center gap-3" style={{ flex: '0 1 auto' }}>
+              <div className="viewer-toolbar-group flex items-center gap-3 flex-shrink-0">
                 {/* View Mode Selection Control */}
                 <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm h-8 select-none font-sans bg-white items-center">
                   <button 
@@ -1320,7 +1320,7 @@ export default function App() {
               </div>
 
               {/* GROUP 3: Zoom controls + Reset */}
-              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 1 auto' }}>
+              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
                 <div className="flex items-center gap-1.5 font-sans">
                   <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom</span>
                   <button 
@@ -1356,7 +1356,7 @@ export default function App() {
               </div>
 
               {/* Search function input field */}
-              <div className="viewer-toolbar-group flex items-center gap-2" style={{ minWidth: 0, maxWidth: '200px', flex: '0 1 auto' }}>
+              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1">
                   <div className="relative" style={{ minWidth: 0 }}>
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">

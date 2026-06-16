@@ -1945,13 +1945,19 @@ export default function App() {
   }, []);
 
   // Compute available height for the central viewer area so content never overflows viewport
+  // Accounts for workspace padding (12px top + 12px bottom = 24px) and gap (12px)
   useEffect(() => {
     const measure = () => {
       const hh = headerRef.current?.offsetHeight || 0;
       const th = toolbarRef.current?.offsetHeight || 0;
       const bt = bottomTrackRef.current?.offsetHeight || 0;
       const ls = lowerStatusRef.current?.offsetHeight || 0;
-      const gap = 24; // small buffer for margins
+      // 24 = workspace padding (12px top + 12px bottom)
+      // 12 = workspace gap between sidebar and right column
+      // 24 = additional buffer for margins
+      const workspacePaddingAndGap = 24 + 12; // = 36px
+      const additionalBuffer = 24;
+      const gap = workspacePaddingAndGap + additionalBuffer; // = 60px total
       const available = Math.max(window.innerHeight - hh - th - bt - ls - gap, 220);
       setViewerHeight(available);
     };

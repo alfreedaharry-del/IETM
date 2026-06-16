@@ -1258,9 +1258,9 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
             
             {/* VIEWING TOOLBAR - TOP POSITION */}
-            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-between shrink-0 mb-3 shadow-sm font-sans overflow-hidden" style={{ alignContent: 'flex-start' }}>
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex items-center justify-between shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
               {/* GROUP 1: Prev / Page / Next */}
-              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 1 auto' }}>
+              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 0 auto' }}>
               
                 <div className="flex items-center gap-2">
                 {/* Prev Button */}
@@ -1276,7 +1276,7 @@ export default function App() {
                 </button>
 
                 {/* Current Page numbering */}
-                <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center" style={{ minWidth: 'clamp(88px, 18vw, 140px)' }}>
+                <div className="bg-neutral-50 border border-neutral-200 px-1 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center whitespace-nowrap" style={{ minWidth: '48px', maxWidth: '90px' }}>
                   {viewMode === 'single' 
                     ? currentManualPages[currentPageIndex]?.pageNumber || ''
                     : `Page ${currentManualPages[currentPairIndex * 2]?.pageNumber || ''}-${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber || currentManualPages[currentPairIndex * 2]?.pageNumber || ''}`
@@ -1356,9 +1356,9 @@ export default function App() {
               </div>
 
               {/* Search function input field */}
-              <div className="viewer-toolbar-group flex items-center gap-2 flex-grow max-w-sm" style={{ minWidth: '120px', maxWidth: 'clamp(120px, 38vw, 520px)' }}>
-                <form onSubmit={handleSearchExecute} className="flex items-center gap-1.5 flex-grow">
-                  <div className="relative flex-grow">
+              <div className="viewer-toolbar-group flex items-center gap-2" style={{ minWidth: 0, maxWidth: '200px', flex: '0 1 auto' }}>
+                <form onSubmit={handleSearchExecute} className="flex items-center gap-1">
+                  <div className="relative" style={{ minWidth: 0 }}>
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
                       <Search size={13} />
                     </span>
@@ -1367,15 +1367,15 @@ export default function App() {
                       type="text" 
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search current manual..."
-                      className="w-full h-8 pl-8 pr-3 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors"
-                      style={{ minWidth: '90px', maxWidth: '100%' }}
+                      placeholder="Search"
+                      className="h-8 pl-8 pr-2 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors w-auto"
+                      style={{ minWidth: '48px', maxWidth: '140px' }}
                     />
                   </div>
                   <button 
                     id="search_submit_btn"
                     type="submit" 
-                    className="flex items-center gap-1.5 text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-8 px-3.5 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
+                    className="flex items-center gap-1 text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-8 px-2 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
                     title="Find phrase"
                   >
                     <span>Search</span>

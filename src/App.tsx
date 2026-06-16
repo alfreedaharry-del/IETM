@@ -249,6 +249,11 @@ export default function App() {
   const [pdfMapping, setPdfMapping] = useState<Record<string, string>>({});
   const [manualsInfo, setManualsInfo] = useState<Record<string, { title: string; pagesCount: number; startPage: number }>>({});
   const navPanelRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const bottomTrackRef = useRef<HTMLDivElement | null>(null);
+  const lowerStatusRef = useRef<HTMLDivElement | null>(null);
+  const [viewerHeight, setViewerHeight] = useState<number | null>(null);
 
   // Hover drawer & speech state
   const [hoverInfo, setHoverInfo] = useState<null | { id: string; title: string; desc: string; top: number; left: number }>(null);
@@ -1169,7 +1174,7 @@ export default function App() {
       <div id="main_ietm_interface" className="h-screen w-screen flex flex-col bg-neutral-100 font-sans overflow-hidden">
         
         {/* FIXED TOP WINDOW TITLE BAR - MODERN ENTERPRISE HEADER */}
-        <div id="retro_top_header" className="relative overflow-hidden text-[#000000] px-4 py-6 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50" style={{ backgroundImage: `url('${headerBg}')`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
+        <div id="retro_top_header" ref={headerRef} className="relative overflow-hidden text-[#000000] px-4 py-6 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50" style={{ backgroundImage: `url('${headerBg}')`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
           {/* Subtle Technical/Engineering Blueprints Grid Mesh */}
           <div className="absolute inset-0 opacity-[0.20] pointer-events-none mix-blend-multiply" style={{ 
             backgroundImage: 'radial-gradient(circle, #0284c7 1px, transparent 1px), linear-gradient(to right, rgba(14,165,233,0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(14,165,233,0.18) 1px, transparent 1px)', 
@@ -1180,7 +1185,7 @@ export default function App() {
             <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(28px, 4.5vw, 50px)', minHeight: 28, minWidth: 28 }} />
           </div>
 
-          <div className="text-center font-sans relative z-10 flex-1" style={{ minWidth: 0 }}>
+            <div className="text-center font-sans relative z-10 flex-1" style={{ minWidth: 0 }}>
             <h1 className="font-black uppercase leading-tight text-center" style={{ fontSize: 'clamp(16px, 1.8vw, 28px)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               Field Telephone Set with Magneto and Auto Mode (RFT1001)
             </h1>
@@ -1201,7 +1206,7 @@ export default function App() {
         <div className="flex-grow flex flex-row overflow-hidden min-h-0 bg-neutral-100 p-3 gap-3">
           
           {/* LEFT COLUMN: NAVIGATION EXPLORER PANEL */}
-          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }}>
+          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }} style={{ height: viewerHeight ? `${viewerHeight}px` : undefined }}>
             <div className="text-[#0ea5e9] text-sm font-bold font-sans tracking-wide border-b border-neutral-100 pb-2 mb-3 uppercase flex items-center gap-2">
               <span className="w-1.5 h-3 bg-[#0ea5e9] rounded-sm inline-block"></span>
               <span>Document Explorer</span>
@@ -1225,8 +1230,8 @@ export default function App() {
               </div>
             )}
 
-            {/* Quick terminal quick-stats overview */}
-            <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-3 p-3 text-xs font-sans text-left text-neutral-600 space-y-1.5">
+            {/* Quick terminal quick-stats overview (anchored to bottom) */}
+            <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-auto p-3 text-xs font-sans text-left text-neutral-600 space-y-1.5">
               <span className="font-bold text-neutral-800 border-b border-neutral-100 block pb-1 mb-1.5 text-xs uppercase tracking-wider">Active Document</span>
               <div className="text-[#0ea5e9] truncate font-semibold text-[13px]" title={manualsInfo[activeManualId]?.title}>
                 {manualsInfo[activeManualId]?.title}
@@ -1253,9 +1258,9 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
             
             {/* VIEWING TOOLBAR - TOP POSITION */}
-            <div id="viewer_toolbar" className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-between shrink-0 mb-3 shadow-sm font-sans overflow-hidden" style={{ alignContent: 'flex-start' }}>
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-between shrink-0 mb-3 shadow-sm font-sans overflow-hidden" style={{ alignContent: 'flex-start' }}>
               {/* GROUP 1: Prev / Page / Next */}
-              <div className="viewer-toolbar-group flex items-center gap-2">
+              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 1 auto' }}>
               
                 <div className="flex items-center gap-2">
                 {/* Prev Button */}
@@ -1271,7 +1276,7 @@ export default function App() {
                 </button>
 
                 {/* Current Page numbering */}
-                <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded min-w-[140px] select-none text-center">
+                <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center" style={{ minWidth: 'clamp(88px, 18vw, 140px)' }}>
                   {viewMode === 'single' 
                     ? currentManualPages[currentPageIndex]?.pageNumber || ''
                     : `Page ${currentManualPages[currentPairIndex * 2]?.pageNumber || ''}-${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber || currentManualPages[currentPairIndex * 2]?.pageNumber || ''}`
@@ -1293,7 +1298,7 @@ export default function App() {
               </div>
 
               {/* GROUP 2: View Mode (Single/Double) */}
-              <div className="viewer-toolbar-group flex items-center gap-3">
+              <div className="viewer-toolbar-group flex items-center gap-3" style={{ flex: '0 1 auto' }}>
                 {/* View Mode Selection Control */}
                 <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm h-8 select-none font-sans bg-white items-center">
                   <button 
@@ -1315,7 +1320,7 @@ export default function App() {
               </div>
 
               {/* GROUP 3: Zoom controls + Reset */}
-              <div className="viewer-toolbar-group flex items-center gap-2">
+              <div className="viewer-toolbar-group flex items-center gap-2" style={{ flex: '0 1 auto' }}>
                 <div className="flex items-center gap-1.5 font-sans">
                   <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom</span>
                   <button 
@@ -1351,7 +1356,7 @@ export default function App() {
               </div>
 
               {/* Search function input field */}
-              <div className="viewer-toolbar-group flex items-center gap-2 flex-grow max-w-sm">
+              <div className="viewer-toolbar-group flex items-center gap-2 flex-grow max-w-sm" style={{ minWidth: '120px', maxWidth: 'clamp(120px, 38vw, 520px)' }}>
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1.5 flex-grow">
                   <div className="relative flex-grow">
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
@@ -1364,6 +1369,7 @@ export default function App() {
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search current manual..."
                       className="w-full h-8 pl-8 pr-3 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors"
+                      style={{ minWidth: '90px', maxWidth: '100%' }}
                     />
                   </div>
                   <button 
@@ -1407,16 +1413,17 @@ export default function App() {
             {/* MAIN PDF VIEW AREA - ACTIVE CHANNELS IN MIDDLE */}
             <div className="flex-grow border border-neutral-200 rounded-lg flex flex-col min-h-0 relative overflow-hidden bg-[#edf0f2]">
               {/* Actual Dual-Page Render Arena */}
-              <div 
+                <div 
                 ref={scrollContainerRef}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }}
-                className={`flex-grow overflow-auto p-2 relative flex select-none bg-[#edf0f2] ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
+                className={`overflow-auto p-2 relative flex select-none bg-[#edf0f2] ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
                 style={{ 
                   scrollbarGutter: 'stable',
-                  perspective: 1500
+                  perspective: 1500,
+                  height: viewerHeight ? `${viewerHeight}px` : undefined
                 }}
               >
                 
@@ -1447,7 +1454,7 @@ export default function App() {
                 )}
 
                 {/* Dynamic Viewport Layout List with Framer Motion Page Turn Transitions */}
-                <div className="m-auto min-w-max min-h-max flex justify-center items-center py-6">
+                <div className="m-auto min-w-max min-h-max flex justify-center items-center py-2">
                   {viewMode === 'single' ? (
                     <AnimatePresence mode="wait" custom={direction} initial={false}>
                       {currentManualPages[currentPageIndex] && (
@@ -1868,7 +1875,7 @@ export default function App() {
             </div>
 
             {/* BOTTOM HORIZONTAL DRAGGABLE RAPID-NAVIGATION TRACK */}
-            <div className="bg-white border-t border-neutral-200 px-3 py-1.5 mx-1 mb-2 shadow-sm select-none font-sans shrink-0">
+            <div ref={bottomTrackRef} className="bg-white border-t border-neutral-200 px-3 py-1.5 mx-0 mb-0 shadow-sm select-none font-sans shrink-0">
               <div className="relative w-full h-[12px] flex items-center">
                 {/* Unfilled background track */}
                 <div className="absolute inset-x-0 h-[3px] bg-neutral-200 rounded-full pointer-events-none" />
@@ -1914,7 +1921,7 @@ export default function App() {
             </div>
 
             {/* LOWER STATUS STRIP */}
-            <div id="lower_status_bar" className="bg-neutral-50 border-t border-neutral-200 p-1.5 flex justify-end font-sans text-xs text-neutral-500 shrink-0 select-none rounded-b-lg">
+            <div id="lower_status_bar" ref={lowerStatusRef} className="bg-neutral-50 border-t border-neutral-200 p-1.5 flex justify-end font-sans text-xs text-neutral-500 shrink-0 select-none rounded-b-lg">
               <div className="border border-neutral-200 rounded-md bg-white px-3 py-1 font-bold text-[#0ea5e9] shadow-sm flex items-center">
                 {/* footer version removed per requirements */}
               </div>
@@ -1935,6 +1942,22 @@ export default function App() {
         try { window.speechSynthesis.cancel(); } catch (e) {}
       }
     };
+  }, []);
+
+  // Compute available height for the central viewer area so content never overflows viewport
+  useEffect(() => {
+    const measure = () => {
+      const hh = headerRef.current?.offsetHeight || 0;
+      const th = toolbarRef.current?.offsetHeight || 0;
+      const bt = bottomTrackRef.current?.offsetHeight || 0;
+      const ls = lowerStatusRef.current?.offsetHeight || 0;
+      const gap = 24; // small buffer for margins
+      const available = Math.max(window.innerHeight - hh - th - bt - ls - gap, 220);
+      setViewerHeight(available);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
   }, []);
 
   return (

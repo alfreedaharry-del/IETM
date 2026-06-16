@@ -281,7 +281,7 @@ input[type=range].custom-slider::-moz-range-track {
 
 /* Viewer toolbar grouping: ensure groups wrap as units and left-align when wrapped */
 #viewer_toolbar { align-content: flex-start; }
-.viewer-toolbar-group { flex-shrink: 0; display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.viewer-toolbar-group { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; white-space: nowrap; }
 .viewer-toolbar-group.flex-grow { flex: 1 1 auto; }
 
 @media (max-width: 700px) {

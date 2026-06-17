@@ -445,6 +445,10 @@ const decreaseVolume = () => {
   const [pdfPagesMap, setPdfPagesMap] = useState<Record<string, ManualPage[]>>({});
   const [pdfDocsMap, setPdfDocsMap] = useState<Record<string, any>>({});
   const [loadingManuals, setLoadingManuals] = useState<Record<string, boolean>>({});
+  // Track which pages have been requested/rendered (lazy load per-page)
+  const [loadedPagesMap, setLoadedPagesMap] = useState<Record<string, Record<number, boolean>>>({});
+  // Debounced zoom to avoid thrashing renders during rapid zoom/resize
+  const [debouncedZoom, setDebouncedZoom] = useState<number>(zoomLevel);
 
   const isPdfManual = pdfMapping[activeManualId] !== undefined;
   
@@ -461,7 +465,72 @@ const decreaseVolume = () => {
 
   // Synchronize sliderValue with the current position when not actively dragging
   useEffect(() => {
-    if (isDraggingSlider) return;
+    // debounce zoom changes to avoid re-rendering all canvases frequently
+    const t = setTimeout(() => setDebouncedZoom(zoomLevel), 120);
+    return () => clearTimeout(t);
+  }, [zoomLevel]);
+
+  // Helper: parse a single page on demand (incremental, non-blocking)
+  const parsePage = async (manualId: string, pageNum: number) => {
+    try {
+      const pdf = pdfDocsMap[manualId];
+      if (!pdf) return;
+
+      // If already parsed paragraphs exist, skip
+      const pages = pdfPagesMap[manualId];
+      if (pages && pages[pageNum - 1] && pages[pageNum - 1].paragraphs && pages[pageNum - 1].paragraphs.length > 0) return;
+
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+
+      const textItems = (textContent && textContent.items) ? (textContent.items as any[]) : [];
+      const lineMap: Record<number, any[]> = {};
+      textItems.forEach(item => {
+        const y = Math.round(item.transform[5]);
+        let foundYKey = Object.keys(lineMap).map(Number).find(keyY => Math.abs(keyY - y) < 5);
+        if (foundYKey !== undefined) {
+          lineMap[foundYKey].push(item);
+        } else {
+          lineMap[y] = [item];
+        }
+      });
+
+      const sortedYKeys = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
+      const lines: string[] = [];
+
+      sortedYKeys.forEach(yKey => {
+        const lineItems = lineMap[yKey];
+        lineItems.sort((a, b) => a.transform[4] - b.transform[4]);
+        const lineText = lineItems.map(item => item.str).join(' ').trim();
+        if (lineText) lines.push(lineText);
+      });
+
+      const pageTextLength = lines.join(' ').trim().length;
+      const isImageBased = pageTextLength < 15;
+      const firstLineWithText = lines.find(l => l.trim().length > 3) || `Page ${pageNum}`;
+
+      setPdfPagesMap(prev => {
+        const existing = prev[manualId] ? [...prev[manualId]] : [];
+        const idx = pageNum - 1;
+        const existingPage = existing[idx] || { id: `${manualId}-pdf-p-${pageNum}`, manualId, pageNumber: pageNum, sectionTitle: firstLineWithText, subTitle: '', paragraphs: [], isImageBased };
+        existing[idx] = { ...existingPage, sectionTitle: firstLineWithText.trim().substring(0,100), paragraphs: lines, isImageBased } as ManualPage;
+        return { ...prev, [manualId]: existing };
+      });
+
+        // mark as loaded
+        setLoadedPagesMap(prev => ({ ...(prev || {}), [manualId]: { ...((prev && prev[manualId]) || {}), [pageNum]: true } }));
+      // If this looks image-based, trigger background OCR for this page
+      if (isImageBased && (typeof triggerBackgroundOCR === 'function')) {
+        try { triggerBackgroundOCR(pdf, manualId, [pageNum]); } catch (e) { /* ignore */ }
+      }
+      } catch (err) {
+        console.error('Error parsing page', manualId, pageNum, err);
+      }
+    };
+
+    // Synchronize sliderValue with the current position when not actively dragging
+    useEffect(() => {
+      if (isDraggingSlider) return;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -704,65 +773,33 @@ const decreaseVolume = () => {
           return { ...prev, [activeManualId]: 'single' };
         });
 
-        const parsedPages: ManualPage[] = [];
-        const imageBasedPageNumbers: number[] = [];
-
-        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-          const page = await pdf.getPage(pageNum);
-          const textContent = await page.getTextContent();
-          
-          if (!isMounted) return;
-
-          const textItems = textContent.items as any[];
-          const lineMap: Record<number, any[]> = {};
-          
-          textItems.forEach(item => {
-            const y = Math.round(item.transform[5]);
-            let foundYKey = Object.keys(lineMap).map(Number).find(keyY => Math.abs(keyY - y) < 5);
-            if (foundYKey !== undefined) {
-              lineMap[foundYKey].push(item);
-            } else {
-              lineMap[y] = [item];
-            }
-          });
-
-          const sortedYKeys = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
-          const lines: string[] = [];
-
-          sortedYKeys.forEach(yKey => {
-            const lineItems = lineMap[yKey];
-            lineItems.sort((a, b) => a.transform[4] - b.transform[4]);
-            const lineText = lineItems.map(item => item.str).join(' ').trim();
-            if (lineText) lines.push(lineText);
-          });
-
-          const pageTextLength = lines.join(' ').trim().length;
-          const isImageBased = pageTextLength < 15;
-          if (isImageBased) {
-            imageBasedPageNumbers.push(pageNum);
-          }
-
-          const firstLineWithText = lines.find(l => l.trim().length > 3) || `Page ${pageNum}`;
-
-          parsedPages.push({
-            id: `${activeManualId}-pdf-p-${pageNum}`,
+        // Create lightweight placeholders for all pages so the viewer can layout
+        // without parsing every page. Detailed parsing occurs on-demand per page.
+        const placeholderPages: ManualPage[] = [];
+        for (let i = 1; i <= numPages; i++) {
+          placeholderPages.push({
+            id: `${activeManualId}-pdf-p-${i}`,
             manualId: activeManualId,
-            pageNumber: pageNum,
-            sectionTitle: firstLineWithText.trim().substring(0, 100),
+            pageNumber: i,
+            sectionTitle: `Page ${i}`,
             subTitle: '',
-            paragraphs: lines,
-            isImageBased: isImageBased,
+            paragraphs: [],
+            isImageBased: false,
           });
         }
 
         if (isMounted) {
-          setPdfPagesMap(prev => ({ ...prev, [activeManualId]: parsedPages }));
+          setPdfPagesMap(prev => ({ ...prev, [activeManualId]: placeholderPages }));
           setPdfDocsMap(prev => ({ ...prev, [activeManualId]: pdf }));
           setLoadingManuals(prev => ({ ...prev, [activeManualId]: false }));
 
-          // Run background OCR for empty/image pages
-          if (imageBasedPageNumbers.length > 0) {
-            triggerBackgroundOCR(pdf, activeManualId, imageBasedPageNumbers);
+          // ensure first page is queued for parsing and rendering immediately
+          setLoadedPagesMap(prev => ({ ...(prev || {}), [activeManualId]: { ...(prev && prev[activeManualId] ? prev[activeManualId] : {}), [1]: true } }));
+          // parse first page during idle time to avoid blocking
+          if ((window as any).requestIdleCallback) {
+            (window as any).requestIdleCallback(() => parsePage(activeManualId, 1));
+          } else {
+            setTimeout(() => parsePage(activeManualId, 1), 50);
           }
         }
       } catch (err) {
@@ -779,6 +816,52 @@ const decreaseVolume = () => {
       isMounted = false;
     };
   }, [activeManualId]);
+
+  // Observe placeholders and lazily parse/render pages when they enter the viewport
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || !activeManualId) return;
+
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target as HTMLElement;
+        const pageNumAttr = el.getAttribute('data-page-number');
+        if (!pageNumAttr) return;
+        const pageNum = Number(pageNumAttr);
+        if (!pageNum) return;
+
+        // mark page to be rendered and parse it
+        setLoadedPagesMap(prev => ({ ...(prev || {}), [activeManualId]: { ...((prev && prev[activeManualId]) || {}), [pageNum]: true } }));
+        // parse in idle time
+        if ((window as any).requestIdleCallback) {
+          (window as any).requestIdleCallback(() => parsePage(activeManualId, pageNum));
+        } else {
+          setTimeout(() => parsePage(activeManualId, pageNum), 50);
+        }
+
+        // prefetch adjacent pages for smoother navigation
+        const prefetch = [pageNum + 1, pageNum - 1, pageNum + 2];
+        prefetch.forEach(pn => {
+          if (pn > 0 && pn <= (pdfDocsMap[activeManualId]?.numPages || 0)) {
+            if ((window as any).requestIdleCallback) {
+              (window as any).requestIdleCallback(() => parsePage(activeManualId, pn));
+            } else {
+              setTimeout(() => parsePage(activeManualId, pn), 200);
+            }
+          }
+        });
+      });
+    }, { root: container, rootMargin: '600px 0px 600px 0px', threshold: 0.01 });
+
+    // observe existing placeholders
+    const placeholders = Array.from(container.querySelectorAll('.page-placeholder')) as HTMLElement[];
+    placeholders.forEach(p => io.observe(p));
+
+    return () => {
+      try { io.disconnect(); } catch (e) {}
+    };
+  }, [activeManualId, pdfPagesMap, pdfDocsMap]);
 
   // Reset pan whenever the active manual changes or zoom/layout changes
   useEffect(() => {
@@ -1527,7 +1610,7 @@ const decreaseVolume = () => {
               </div>
 
               {/* CENTER: Page navigation (prev, current, next) */}
-              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 justify-center flex-1 min-w-0">
+              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 justify-center w-fit mx-auto min-w-0">
                 <button
                   type="button"
                   onClick={handlePrevPage}
@@ -1552,9 +1635,9 @@ const decreaseVolume = () => {
               </div>
 
               {/* RIGHT: Search function input field (keeps existing behavior) */}
-              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 flex-shrink-0 relative z-10">
-                <form onSubmit={handleSearchExecute} className="flex items-center gap-1">
-                  <div className="relative" style={{ minWidth: 0 }}>
+              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 min-w-0 relative z-10">
+                <form onSubmit={handleSearchExecute} className="flex items-center gap-1 w-full min-w-0">
+                  <div className="relative min-w-0 w-[clamp(40px,20vw,325px)]">
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
                       <Search size={13} />
                     </span>
@@ -1564,14 +1647,14 @@ const decreaseVolume = () => {
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search"
-                      className="h-8 pl-8 pr-2 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors w-auto"
-                      style={{ minWidth: '20px', maxWidth: 'clamp(120px, 12vw, 180px)' }}
+                      className="h-8 pl-8 pr-2 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors min-w-0 w-full"
+                      style={{ minWidth: '20px'}}
                     />
                   </div>
                   <button 
                     id="search_submit_btn"
                     type="submit" 
-                    className="flex items-center gap-1 text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-8 px-2 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
+                    className="flex items-center gap-1 flex-shrink-0 text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-8 px-2 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
                     title="Find phrase"
                   >
                     <span>Search</span>
@@ -1677,34 +1760,49 @@ const decreaseVolume = () => {
                                     : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
                                 : safeContainerWidth;
 
-                              const visualWidth = baseWidth * (zoomLevel / 100);
+                              const visualWidth = baseWidth * (debouncedZoom / 100);
                               
                               return (
                                 <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
-                                  <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (zoomLevel / 100))}px` }}>
-                                    {isPdfManual ? (
-                                      loadingManuals[activeManualId] ? (
-                                        <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
-                                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
-                                          <span>LOADING PDF...</span>
-                                        </div>
-                                      ) : pdfDocsMap[activeManualId] ? (
-                                        <div className="w-full flex items-center justify-center">
-                                          <div style={{ width: `${visualWidth}px` }} className="relative">
-                                            <PdfPageRenderer
-                                              pdfDoc={pdfDocsMap[activeManualId]}
-                                              pageNumber={page.pageNumber}
-                                              zoomLevel={zoomLevel}
-                                              activeSearchTerm={activeSearchTerm}
-                                              activeMatchIndexOnPage={
-                                                selectedResult && selectedResult.pageNumber === page.pageNumber
-                                                  ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
-                                                  : -1
-                                              }
-                                              width={Math.max(1, baseWidth)}
-                                              padding={0}
-                                            />
+                                  <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}>
+                                      {isPdfManual ? (
+                                        loadingManuals[activeManualId] ? (
+                                          <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
+                                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
+                                            <span>LOADING PDF...</span>
                                           </div>
+                                        ) : pdfDocsMap[activeManualId] ? (
+                                          <div className="w-full flex items-center justify-center">
+                                            <div style={{ width: `${visualWidth}px` }} className="relative">
+                                              {
+                                                // Only mount heavy renderer when this page is marked for loading
+                                              }
+                                              {((loadedPagesMap[activeManualId] && loadedPagesMap[activeManualId][page.pageNumber]) && pdfDocsMap[activeManualId]) ? (
+                                                <div>
+                                                  <PdfPageRenderer
+                                                    pdfDoc={pdfDocsMap[activeManualId]}
+                                                    pageNumber={page.pageNumber}
+                                                    zoomLevel={debouncedZoom}
+                                                    activeSearchTerm={activeSearchTerm}
+                                                    activeMatchIndexOnPage={
+                                                      selectedResult && selectedResult.pageNumber === page.pageNumber
+                                                        ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                        : -1
+                                                    }
+                                                    width={Math.max(1, baseWidth)}
+                                                    padding={0}
+                                                  />
+                                                </div>
+                                              ) : (
+                                                <div
+                                                  className="page-placeholder w-full h-full flex items-center justify-center bg-neutral-50"
+                                                  data-page-number={page.pageNumber}
+                                                  style={{ minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}
+                                                >
+                                                  <div className="text-neutral-400 text-xs">Page {page.pageNumber}</div>
+                                                </div>
+                                              )}
+                                            </div>
                                           {/* OCR overlay for this page */}
                                           {page?.isImageBased && page?.paragraphs && page?.paragraphs.length > 0 && activeSearchTerm && (
                                             <div className="absolute left-1/2 translate-x-[-50%] bottom-4 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text" style={{ width: `${Math.min(visualWidth, 560)}px` }}>
@@ -1822,11 +1920,11 @@ const decreaseVolume = () => {
                                   : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
                               : safeContainerWidth;
 
-                            const visualWidth = baseWidth * (zoomLevel / 100);
+                            const visualWidth = baseWidth * (debouncedZoom / 100);
                             
                             return (
                               <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
-                                <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (zoomLevel / 100))}px` }}>
+                                <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}>
                                   {isPdfManual ? (
                                     loadingManuals[activeManualId] ? (
                                       <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
@@ -1836,19 +1934,29 @@ const decreaseVolume = () => {
                                     ) : pdfDocsMap[activeManualId] ? (
                                       <div className="w-full flex items-center justify-center">
                                         <div style={{ width: `${visualWidth}px` }} className="relative">
-                                          <PdfPageRenderer
-                                            pdfDoc={pdfDocsMap[activeManualId]}
-                                            pageNumber={page.pageNumber}
-                                            zoomLevel={zoomLevel}
-                                            activeSearchTerm={activeSearchTerm}
-                                            activeMatchIndexOnPage={
-                                              selectedResult && selectedResult.pageNumber === page.pageNumber
-                                                ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
-                                                : -1
-                                            }
-                                            width={Math.max(1, baseWidth)}
-                                            padding={0}
-                                          />
+                                          {((loadedPagesMap[activeManualId] && loadedPagesMap[activeManualId][page.pageNumber]) && pdfDocsMap[activeManualId]) ? (
+                                            <PdfPageRenderer
+                                              pdfDoc={pdfDocsMap[activeManualId]}
+                                              pageNumber={page.pageNumber}
+                                              zoomLevel={debouncedZoom}
+                                              activeSearchTerm={activeSearchTerm}
+                                              activeMatchIndexOnPage={
+                                                selectedResult && selectedResult.pageNumber === page.pageNumber
+                                                  ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                  : -1
+                                              }
+                                              width={Math.max(1, baseWidth)}
+                                              padding={0}
+                                            />
+                                          ) : (
+                                            <div
+                                              className="page-placeholder w-full h-full flex items-center justify-center bg-neutral-50"
+                                              data-page-number={page.pageNumber}
+                                              style={{ minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}
+                                            >
+                                              <div className="text-neutral-400 text-xs">Page {page.pageNumber}</div>
+                                            </div>
+                                          )}
                                         </div>
                                         {/* OCR overlay for this page */}
                                         {page?.isImageBased && page?.paragraphs && page?.paragraphs.length > 0 && activeSearchTerm && (

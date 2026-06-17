@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Folder, 
@@ -35,14 +35,16 @@ import {
 import { PAGES_DATABASE, ManualPage, DocumentSection } from './data';
 import { EngineeringDiagram } from './components/EngineeringDiagram';
 import * as pdfjsLib from 'pdfjs-dist';
+// @ts-ignore: Vite-style worker URL import
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { Volume2, Plus, Minus } from "lucide-react";
 
 // Asset URLs via Vite's import meta URL to ensure correct production paths
 const logoImg = new URL('./assets/images/logo-1.png', import.meta.url).href;
 const logoWebp = new URL('./assets/images/logo.webp', import.meta.url).href;
 const phoneImg = new URL('./assets/images/phone.webp', import.meta.url).href;
 const headerBg = new URL('./assets/images/header.webp', import.meta.url).href;
-const PDF_BASE_WIDTH = 500; // increased base width for larger default PDF view
+
 
 // Configure the worker to use the local module via Vite's URL handling for deployment stability
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -88,13 +90,21 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+
         const originalViewport = page.getViewport({ scale: 1 });
         const targetWidth = width * (zoomLevel / 100) - padding;
         const scale = targetWidth / originalViewport.width;
-        const viewport = page.getViewport({ scale: scale });
 
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
+        // Render at device pixel ratio to keep canvas crisp on high-DPI displays
+        const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+        const cssViewport = page.getViewport({ scale: scale });
+        const renderViewport = page.getViewport({ scale: scale * dpr });
+
+        // Use higher-resolution backing store while keeping CSS size equal to logical viewport
+        canvas.width = Math.round(renderViewport.width);
+        canvas.height = Math.round(renderViewport.height);
+        canvas.style.width = `${Math.round(cssViewport.width)}px`;
+        canvas.style.height = `${Math.round(cssViewport.height)}px`;
 
         if (renderTaskRef.current) {
           renderTaskRef.current.cancel();
@@ -102,7 +112,7 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
 
         const renderContext = {
           canvasContext: ctx,
-          viewport: viewport
+          viewport: renderViewport
         };
         
         const renderTask = page.render(renderContext);
@@ -122,8 +132,8 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
           const pdfPageWidth = page.view[2];
           const pdfPageHeight = page.view[3];
           
-          const scaleX = viewport.width / pdfPageWidth;
-          const scaleY = viewport.height / pdfPageHeight;
+          const scaleX = cssViewport.width / pdfPageWidth;
+          const scaleY = cssViewport.height / pdfPageHeight;
           
           items.forEach(item => {
             if (item.str.toLowerCase().includes(query)) {
@@ -179,7 +189,7 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
             return (
               <div 
                 key={index} 
-                className={`absolute mix-blend-multiply rounded-sm pointer-events-none transition-all duration-150 ${
+                className={`absolute rounded-sm pointer-events-none ${
                   isCurrentlySelected 
                     ? 'bg-red-500/50 border-2 border-red-700 shadow-[0_0_8px_rgba(239,68,68,0.8)] z-10 scale-105' 
                     : 'bg-yellow-400/35 border border-amber-600/50'
@@ -253,6 +263,22 @@ export default function App() {
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const bottomTrackRef = useRef<HTMLDivElement | null>(null);
   const lowerStatusRef = useRef<HTMLDivElement | null>(null);
+  const [speechVolume, setSpeechVolume] = useState(1.0);
+  const [totalPages, setTotalPages] = useState(0);
+  
+  // container-based measurement for PDF layout (replaces window-based PDF_BASE_WIDTH)
+  
+  const pdfContainerRef = useRef<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const safeContainerWidth = containerWidth || 800;
+  const VIEW_FIT = {
+    single: 1.25,
+    double: 0.5,
+  };
+
+  // Measurement useLayoutEffect moved below after viewMode declaration to avoid TDZ
+
+
   // viewerHeight removed: rely on CSS flexbox for responsive sizing
 
   // Hover drawer & speech state
@@ -274,31 +300,59 @@ export default function App() {
   };
 
   // Speak description once per hover entry
-  const speakDescription = (id: string, text: string) => {
-    try {
-      if (!text || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-      // Stop previous speech
-      window.speechSynthesis.cancel();
-      setSpokenId(id);
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'en-US';
-      const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) || voices[0];
-      if (preferred) u.voice = preferred;
-      // Speak
-      window.speechSynthesis.speak(u);
-    } catch (err) {
-      console.error('Speech error:', err);
-    }
-  };
+const speakDescription = (id: string, text: string) => {
+  try {
+    if (!text || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
 
-  const clearHover = () => {
-    setHoverInfo(null);
-    setSpokenId(null);
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+    // Stop previous speech
+    window.speechSynthesis.cancel();
+
+    setSpokenId(id);
+
+    const u = new SpeechSynthesisUtterance(text);
+
+    u.lang = 'en-US';
+
+    // Audio settings
+    u.volume = speechVolume; // Controlled by header buttons
+    u.rate = 1.0;
+    u.pitch = 1.0;
+
+    const voices = window.speechSynthesis.getVoices();
+
+    const preferred =
+      voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) ||
+      voices[0];
+
+    if (preferred) {
+      u.voice = preferred;
     }
-  };
+
+    window.speechSynthesis.speak(u);
+
+  } catch (err) {
+    console.error('Speech error:', err);
+  }
+};
+
+const clearHover = () => {
+  setHoverInfo(null);
+  setSpokenId(null);
+
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+  }
+};
+
+
+
+const increaseVolume = () => {
+  setSpeechVolume(prev => Math.min(1, prev + 0.1));
+};
+
+const decreaseVolume = () => {
+  setSpeechVolume(prev => Math.max(0, prev - 0.1));
+};
   
   // Navigation Section Expand/Collapse State - empty map so all sections remain collapsed by default
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -320,24 +374,56 @@ export default function App() {
     };
   }, []);
 
-  // PDF Viewer View State
-  const [viewMode, setViewMode] = useState<'single' | 'double'>('double');
-  const [zoomLevel, setZoomLevel] = useState<number>(140); 
-  const [currentPairIndex, setCurrentPairIndex] = useState<number>(0);
-  const [currentPageIndex, setCurrentPageIndex] = useState<number>(0);
+  // PDF Viewer View State (per-document)
+  const [viewModes, setViewModes] = useState<Record<string, 'single' | 'double'>>({});
+  const currentViewMode = (activeManualId ? viewModes[activeManualId] : undefined) as 'single' | 'double' | undefined;
+  console.log("VIEW_MODE:", currentViewMode);
+  const [zoomLevel, setZoomLevel] = useState<number>(100);
+  // Remove pagination indices: we use continuous vertical scroll instead
   const [direction, setDirection] = useState<'next' | 'prev'>('next');
+
+  // Measure the actual rendered container width and keep it in sync.
+  // Use ResizeObserver so measurements run when the viewer mounts (e.g. after intro screen)
+  useLayoutEffect(() => {
+    const update = () => {
+      if (pdfContainerRef.current) {
+        setContainerWidth(pdfContainerRef.current.clientWidth);
+      }
+    };
+
+    // Call once if available
+    update();
+
+    const ro = new ResizeObserver(() => {
+      update();
+    });
+
+    if (pdfContainerRef.current) {
+      try { ro.observe(pdfContainerRef.current); } catch (e) {}
+    }
+
+    const onWin = () => update();
+    window.addEventListener('resize', onWin);
+
+    return () => {
+      window.removeEventListener('resize', onWin);
+      try { ro.disconnect(); } catch (e) {}
+    };
+  }, [showMainApp]); // re-run when viewer becomes visible so initial measurement is accurate
 
   // Mouse middle-click pan state & refs
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const panStartRef = useRef({ x: 0, y: 0 });
   const scrollStartRef = useRef({ left: 0, top: 0 });
+  const panOriginRef = useRef({ x: 0, y: 0 });
+  const panLayerRef = useRef<HTMLDivElement | null>(null);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
 
   // Reset panning status and handle global window mouseup to release panning mode cleanly
   useEffect(() => {
     const handleGlobalMouseUp = (e: MouseEvent) => {
-      if (e.button === 1) { // Middle mouse button
-        setIsPanning(false);
-      }
+      // Release panning on any mouseup (left or middle)
+      setIsPanning(false);
     };
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => {
@@ -375,10 +461,38 @@ export default function App() {
 
   // Synchronize sliderValue with the current position when not actively dragging
   useEffect(() => {
-    if (!isDraggingSlider) {
-      setSliderValue(viewMode === 'single' ? currentPageIndex : Math.max(0, Math.min(currentPairIndex * 2, totalPagesInManual - 1)));
-    }
-  }, [currentPageIndex, currentPairIndex, viewMode, totalPagesInManual, isDraggingSlider]);
+    if (isDraggingSlider) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const updateFromScroll = () => {
+      const pages = Array.from(container.querySelectorAll('[data-page-number]')) as HTMLElement[];
+      if (!pages || pages.length === 0) return;
+
+      const containerRect = container.getBoundingClientRect();
+      const containerCenter = containerRect.top + (containerRect.height / 2);
+
+      let closestIdx = 0;
+      let minDist = Infinity;
+
+      pages.forEach((el, idx) => {
+        const elRect = el.getBoundingClientRect();
+        const elCenter = elRect.top + (elRect.height / 2);
+        const dist = Math.abs(elCenter - containerCenter);
+        if (dist < minDist) {
+          minDist = dist;
+          closestIdx = idx;
+        }
+      });
+
+      setSliderValue(closestIdx);
+    };
+
+    updateFromScroll();
+    const intervalId = window.setInterval(updateFromScroll, 250);
+    return () => clearInterval(intervalId);
+  }, [currentViewMode, totalPagesInManual, isDraggingSlider]);
+  
 
   // Generate systemic clock for status bar
   useEffect(() => {
@@ -577,7 +691,18 @@ export default function App() {
         const pdfData = new Uint8Array(arrayBuffer);
         const loadingTask = pdfjsLib.getDocument({ data: pdfData });
         const pdf = await loadingTask.promise;
+        
+        
         if (!isMounted) return;
+        const numPages = pdf.numPages;
+        setTotalPages(numPages);
+
+        // defer UI mode change safely
+        // Ensure this document has a view mode set (default to 'single' for all manuals)
+        setViewModes(prev => {
+          if (prev[activeManualId]) return prev;
+          return { ...prev, [activeManualId]: 'single' };
+        });
 
         const parsedPages: ManualPage[] = [];
         const imageBasedPageNumbers: number[] = [];
@@ -655,25 +780,39 @@ export default function App() {
     };
   }, [activeManualId]);
 
+  // Reset pan whenever the active manual changes or zoom/layout changes
+  useEffect(() => {
+    setPan({ x: 0, y: 0 });
+    panOriginRef.current = { x: 0, y: 0 };
+  }, [activeManualId, zoomLevel, containerWidth, currentViewMode]);
+
+  // Ensure each document has a view mode entry when selected
+  useEffect(() => {
+    if (!activeManualId) return;
+    if (viewModes[activeManualId]) return;
+
+    const pages = pdfPagesMap[activeManualId];
+    if (pages && pages.length > 0) {
+      setViewModes(prev => ({ ...prev, [activeManualId]: 'single' }));
+    }
+  }, [activeManualId, pdfPagesMap, viewModes]);
+
   // When changing active manual, reset page views and clear search
   const handleSelectManual = (manualId: string) => {
     console.log('[DOCS] handleSelectManual clicked:', manualId, 'pdfMapping has key?', Object.prototype.hasOwnProperty.call(pdfMapping, manualId));
     console.log('[DOCS] pdfMapping value:', pdfMapping[manualId]);
+    // Reset view mode for this manual explicitly so it does not carry over from previous manuals
+    // Default all manuals to 'single' view on selection
+    setViewModes(prev => ({ ...prev, [manualId]: 'single' }));
     setActiveManualId(manualId);
-    setCurrentPageIndex(0);
-    setCurrentPairIndex(0);
     setSearchQuery('');
     setActiveSearchTerm('');
     setSearchResults([]);
     setCurrentSearchIndex(-1);
     setSearchError('');
     setIsPanning(false);
-    
-    // Scroll viewport to top
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = 0;
-      scrollContainerRef.current.scrollLeft = 0;
-    }
+    // Reset vertical scroll and pan transform (no horizontal scrolling used anymore)
+
   };
 
   const handleHoverEnter = (e: React.MouseEvent, id: string | undefined, title: string) => {
@@ -702,92 +841,11 @@ export default function App() {
     }));
   };
 
-  // Reset scroll on paging
+  // Reset scroll when manual changes and keep slider synced to scroll position
   useEffect(() => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = 0;
-      scrollContainerRef.current.scrollLeft = 0;
-    }
-  }, [currentPageIndex, currentPairIndex, activeManualId]);
+    const container = scrollContainerRef.current;
 
-  // Previous Page / Next Page operators with explicit animation direction setting
-  const handlePrevPage = () => {
-    setDirection('prev');
-    if (viewMode === 'single') {
-      if (currentPageIndex > 0) {
-        const newIndex = currentPageIndex - 1;
-        setCurrentPageIndex(newIndex);
-        setCurrentPairIndex(Math.floor(newIndex / 2));
-      }
-    } else {
-      if (currentPairIndex > 0) {
-        const newIndex = currentPairIndex - 1;
-        setCurrentPairIndex(newIndex);
-        setCurrentPageIndex(newIndex * 2);
-      }
-    }
-  };
-
-  const handleNextPage = () => {
-    setDirection('next');
-    if (viewMode === 'single') {
-      if (currentPageIndex < totalPagesInManual - 1) {
-        const newIndex = currentPageIndex + 1;
-        setCurrentPageIndex(newIndex);
-        setCurrentPairIndex(Math.floor(newIndex / 2));
-      }
-    } else {
-      if (currentPairIndex < totalPairs - 1) {
-        const newIndex = currentPairIndex + 1;
-        setCurrentPairIndex(newIndex);
-        setCurrentPageIndex(newIndex * 2);
-      }
-    }
-  };
-
-  // Synchronize handler references for key down listeners to avoid stale closure re-bind churn
-  const handleNextPageRef = useRef(handleNextPage);
-  const handlePrevPageRef = useRef(handlePrevPage);
-
-  useEffect(() => {
-    handleNextPageRef.current = handleNextPage;
-    handlePrevPageRef.current = handlePrevPage;
-  });
-
-  // Global keyboard listener for Left/Right page navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Priority handling: do not trigger page turning when typing inside input, select or textarea fields
-      const activeEl = document.activeElement;
-      if (activeEl) {
-        const tagName = activeEl.tagName.toUpperCase();
-        if (
-          tagName === 'INPUT' || 
-          tagName === 'TEXTAREA' || 
-          tagName === 'SELECT' ||
-          activeEl.hasAttribute('contenteditable') ||
-          (activeEl as HTMLElement).isContentEditable
-        ) {
-          return;
-        }
-      }
-
-      if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        handleNextPageRef.current();
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        handlePrevPageRef.current();
-      }
-    };
-
-    if (showMainApp) {
-      window.addEventListener('keydown', handleKeyDown);
-    }
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [showMainApp]);
+  }, [activeManualId, isDraggingSlider, totalPagesInManual, currentViewMode, containerWidth, zoomLevel]);
 
   // Handle standard viewport scroll tracking is now optional as only the active page spread is rendered
   const handleViewerScroll = () => {
@@ -796,16 +854,41 @@ export default function App() {
 
   // Immediate view mode transition handler
   const handleViewModeChange = (mode: 'single' | 'double') => {
-    setViewMode(mode);
-    if (mode === 'single') {
-      const targetIdx = currentPairIndex * 2;
-      setCurrentPageIndex(targetIdx);
-    } else {
-      const targetIdx = Math.floor(currentPageIndex / 2);
-      setCurrentPairIndex(targetIdx);
+    if (!activeManualId) return;
+    // Prevent enabling double view on single-page PDFs
+    const pagesForManual = pdfPagesMap[activeManualId];
+    if (mode === 'double' && pagesForManual && pagesForManual.length === 1) return;
+    setViewModes(prev => ({ ...prev, [activeManualId]: mode }));
+
+    setZoomLevel(100);
+
+  };
+  // Page navigation controls (previous / next) using existing scroll container
+  const handlePrevPage = () => {
+    if (!scrollContainerRef.current || !currentManualPages || currentManualPages.length === 0) return;
+    const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
+    const targetIdx = Math.max(0, curIdx - 1);
+    const targetPage = currentManualPages[targetIdx];
+    if (!targetPage) return;
+    const container = scrollContainerRef.current;
+    const el = container.querySelector(`[data-page-number="${targetPage.pageNumber}"]`) as HTMLElement | null;
+    if (el) {
+      setSliderValue(targetIdx);
     }
   };
 
+  const handleNextPage = () => {
+    if (!scrollContainerRef.current || !currentManualPages || currentManualPages.length === 0) return;
+    const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
+    const targetIdx = Math.min(currentManualPages.length - 1, curIdx + 1);
+    const targetPage = currentManualPages[targetIdx];
+    if (!targetPage) return;
+    const container = scrollContainerRef.current;
+    const el = container.querySelector(`[data-page-number="${targetPage.pageNumber}"]`) as HTMLElement | null;
+    if (el) {
+      setSliderValue(targetIdx);
+    }
+  };
   // Search Logic in active manual
   const handleSearchExecute = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -874,15 +957,11 @@ export default function App() {
       // Map global page number back to manual index (0-based list)
       const foundIdx = currentManualPages.findIndex(p => p.pageNumber === targetPage);
       if (foundIdx !== -1) {
-        setDirection(foundIdx > currentPageIndex ? 'next' : 'prev');
-        if (viewMode === 'single') {
-          setCurrentPageIndex(foundIdx);
-          setCurrentPairIndex(Math.floor(foundIdx / 2));
-        } else {
-          const pairIdx = Math.floor(foundIdx / 2);
-          setCurrentPairIndex(pairIdx);
-          setCurrentPageIndex(pairIdx * 2);
+        const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`);
+        if (target && scrollContainerRef.current) {
+          (target as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
+        setSliderValue(foundIdx);
       }
     } else {
       setActiveSearchTerm('');
@@ -899,17 +978,15 @@ export default function App() {
     setCurrentSearchIndex(index);
     const targetPage = searchResults[index].pageNumber;
     const foundIdx = currentManualPages.findIndex(p => p.pageNumber === targetPage);
-    if (foundIdx !== -1) {
-      setDirection(foundIdx > currentPageIndex ? 'next' : 'prev');
-      if (viewMode === 'single') {
-        setCurrentPageIndex(foundIdx);
-        setCurrentPairIndex(Math.floor(foundIdx / 2));
-      } else {
-        const pairIdx = Math.floor(foundIdx / 2);
-        setCurrentPairIndex(pairIdx);
-        setCurrentPageIndex(pairIdx * 2);
+      if (foundIdx !== -1) {
+        // Scroll the found page into view in the vertical container
+        const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`);
+        if (target && scrollContainerRef.current) {
+          (target as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        // update sliderValue optimistically
+        setSliderValue(foundIdx);
       }
-    }
   };
 
   // Check if a rendered text field matches the selected search result
@@ -979,37 +1056,25 @@ export default function App() {
 
   // Direct page click jump indicator with direction logic
   const handleDirectPageJump = (pageIdx: number) => {
-    const currentIdx = viewMode === 'single' ? currentPageIndex : currentPairIndex * 2;
-    if (pageIdx > currentIdx) {
-      setDirection('next');
-    } else if (pageIdx < currentIdx) {
-      setDirection('prev');
-    }
-
-    if (viewMode === 'single') {
-      if (pageIdx >= 0 && pageIdx < totalPagesInManual) {
-        setCurrentPageIndex(pageIdx);
-        setCurrentPairIndex(Math.floor(pageIdx / 2));
-      }
-    } else {
-      const pairIdx = Math.floor(pageIdx / 2);
-      if (pairIdx >= 0 && pairIdx < totalPairs) {
-        setCurrentPairIndex(pairIdx);
-        setCurrentPageIndex(pairIdx * 2);
-      }
+    const page = currentManualPages[Math.max(0, Math.min(pageIdx, currentManualPages.length - 1))];
+    if (!page) return;
+    const target = pdfContainerRef.current?.querySelector(`[data-page-number="${page.pageNumber}"]`);
+    if (target && scrollContainerRef.current) {
+      (target as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
 
-  // Middle-click mouse drag panning handlers
+  // Mouse drag panning handlers (left-click while zoomed in, and middle-click remain supported)
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button === 1) { // Middle mouse click
+    // Left button (0) when zoomed in should start panning
+    const isLeft = e.button === 0;
+    const isMiddle = e.button === 1;
+    const canPanWithLeft = zoomLevel > 100; // only enable left-drag panning when zoomed
+    if (isMiddle || (isLeft && canPanWithLeft)) {
       e.preventDefault();
       setIsPanning(true);
       panStartRef.current = { x: e.clientX, y: e.clientY };
-      scrollStartRef.current = {
-        left: scrollContainerRef.current?.scrollLeft || 0,
-        top: scrollContainerRef.current?.scrollTop || 0
-      };
+      panOriginRef.current = { x: pan.x, y: pan.y };
     }
   };
 
@@ -1018,14 +1083,42 @@ export default function App() {
     e.preventDefault();
     const dx = e.clientX - panStartRef.current.x;
     const dy = e.clientY - panStartRef.current.y;
-    scrollContainerRef.current.scrollLeft = scrollStartRef.current.left - dx;
-    scrollContainerRef.current.scrollTop = scrollStartRef.current.top - dy;
+
+    // compute content and viewport sizes
+    const viewportW = scrollContainerRef.current.clientWidth;
+    const viewportH = scrollContainerRef.current.clientHeight;
+
+    const PAGE_GAP_PX = 20;
+    let contentW = 0;
+    if (currentViewMode === 'single') {
+      const baseWidth = isPdfManual ? safeContainerWidth : safeContainerWidth;
+      contentW = baseWidth * (zoomLevel / 100);
+    } else {
+      const baseSingle = isPdfManual ? (safeContainerWidth * VIEW_FIT.double) : safeContainerWidth;
+      contentW = (baseSingle * (zoomLevel / 100)) * 2 + PAGE_GAP_PX;
+    }
+
+    const contentH = scrollContainerRef.current.scrollHeight;
+
+    const minPanX = Math.min(0, viewportW - contentW);
+    const maxPanX = 0;
+    const minPanY = Math.min(0, viewportH - contentH);
+    const maxPanY = 0;
+
+    let newX = panOriginRef.current.x + dx;
+    let newY = panOriginRef.current.y + dy;
+
+    if (newX < minPanX) newX = minPanX;
+    if (newX > maxPanX) newX = maxPanX;
+    if (newY < minPanY) newY = minPanY;
+    if (newY > maxPanY) newY = maxPanY;
+
+    setPan({ x: newX, y: newY });
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button === 1) {
-      setIsPanning(false);
-    }
+    // Stop panning on mouse release (any button)
+    setIsPanning(false);
   };
 
   // Clean corporate cover introduction screen
@@ -1045,14 +1138,14 @@ export default function App() {
       {/* RIGHT SIDE - Corporate & IETM information (vertically and center aligned) */}
       <div className="flex-1 flex flex-col justify-center items-center p-12 pr-16 bg-white text-center space-y-4 select-text border-none">
         {/* Right column: logo at top, then website and text content centered below */}
-        <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(56px, 9vw, 120px)', whiteSpace: 'nowrap' }} />
+        <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(48px, 7vw, 95px)', whiteSpace: 'nowrap' ,transform: 'translateY(-170px)'}} />
 
         <div style={{ width: '100%', maxWidth: 720 }} className="flex flex-col items-center text-center space-y-3">
-          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(13px, 1.8vw, 18px)' }}>www.elcominnovations.com</a>
+          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(1px, 2.2vw, 30px)' ,transform: 'translateY(-190px)' }}>www.elcominnovations.com</a>
 
           <h2 className="font-black" style={{ fontSize: 'clamp(20px, 2.6vw, 30px)', whiteSpace: 'nowrap', margin: 0 }}>Interactive Electronic Technical Manual (IETM)</h2>
 
-          <div style={{ fontStyle: 'italic', fontSize: 'clamp(12px, 1.4vw, 14px)', whiteSpace: 'nowrap' }}>for</div>
+          <div style={{ fontStyle: 'italic', fontSize: 'clamp(12px, 1.4vw, 14px)', whiteSpace: 'nowrap' ,marginTop: '16px' ,marginBottom: '16px' }}>for</div>
 
           <div className="font-semibold" style={{ fontSize: 'clamp(16px, 2.0vw, 22px)', whiteSpace: 'nowrap' }}>Field Telephone Set with Magneto and Auto Mode (RFT1001)</div>
 
@@ -1170,33 +1263,148 @@ export default function App() {
 
     const selectedResult = searchResults[currentSearchIndex];
 
+    // Compute page label for toolbar (single vs double view)
+    const isSinglePdf = isPdfManual && pdfPagesMap[activeManualId] && pdfPagesMap[activeManualId].length === 1;
+    let pageLabel = '';
+    if (!currentManualPages || currentManualPages.length === 0) {
+      pageLabel = `Page 0 of 0`;
+    } else {
+      const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
+      if (currentViewMode === 'single' || isSinglePdf) {
+        const p = currentManualPages[curIdx].pageNumber;
+        pageLabel = `Page ${p} of ${totalPagesInManual}`;
+      } else {
+        const firstNum = currentManualPages[curIdx].pageNumber;
+        let secondNum: number | undefined = undefined;
+        if (curIdx < currentManualPages.length - 1) {
+          secondNum = currentManualPages[curIdx + 1].pageNumber;
+        } else if (curIdx > 0) {
+          secondNum = currentManualPages[curIdx - 1].pageNumber;
+        } else {
+          secondNum = firstNum;
+        }
+        const start = Math.min(firstNum, secondNum);
+        const end = Math.max(firstNum, secondNum);
+        pageLabel = start === end ? `Page ${start} of ${totalPagesInManual}` : `Page ${start}-${end} of ${totalPagesInManual}`;
+      }
+    }
+
     return (
       <div id="main_ietm_interface" className="h-screen w-screen flex flex-col bg-neutral-100 font-sans overflow-hidden">
         
         {/* FIXED TOP WINDOW TITLE BAR - MODERN ENTERPRISE HEADER */}
-        <div id="retro_top_header" ref={headerRef} className="relative overflow-hidden text-[#000000] px-4 py-6 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50" style={{ backgroundImage: `url('${headerBg}')`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
+        <div
+          id="retro_top_header"
+          ref={headerRef}
+          className="relative overflow-hidden text-[#000000] px-4 py-2 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50"
+          style={{
+            backgroundImage: `url('${headerBg}')`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center'
+          }}
+        >
           {/* Subtle Technical/Engineering Blueprints Grid Mesh */}
-          <div className="absolute inset-0 opacity-[0.20] pointer-events-none mix-blend-multiply" style={{ 
-            backgroundImage: 'radial-gradient(circle, #0284c7 1px, transparent 1px), linear-gradient(to right, rgba(14,165,233,0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(14,165,233,0.18) 1px, transparent 1px)', 
-            backgroundSize: '18px 18px',
-            backgroundPosition: 'center center'
-          }}></div>
-          <div className="flex items-center gap-3 relative z-10" style={{ minWidth: 72 }}>
-            <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(28px, 4.5vw, 50px)', minHeight: 28, minWidth: 28 }} />
+          <div
+            className="absolute inset-0 opacity-[0.20] pointer-events-none mix-blend-multiply"
+            style={{
+              backgroundImage:
+                'radial-gradient(circle, #0284c7 1px, transparent 1px), linear-gradient(to right, rgba(14,165,233,0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(14,165,233,0.18) 1px, transparent 1px)',
+              backgroundSize: '18px 18px',
+              backgroundPosition: 'center center'
+            }}
+          />
+
+          {/* Logo */}
+          <div
+            className="flex items-center gap-3 relative z-10"
+            style={{ minWidth: 72 }}
+          >
+            <img
+              src={logoWebp}
+              alt="ELCOM Logo"
+              className="w-auto object-contain"
+              style={{
+                height: 'clamp(28px, 3.5vw, 50px)',
+                minHeight: 28,
+                minWidth: 28,
+                margin: '25px',
+                transform: 'translateY(0px)'
+              }}
+            />
           </div>
 
-            <div className="text-center font-sans relative z-10 flex-1" style={{ minWidth: 0 }}>
-            <h1 className="font-black uppercase leading-tight text-center" style={{ fontSize: 'clamp(16px, 1.8vw, 28px)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              Field Telephone Set with Magneto and Auto Mode (RFT1001)
-            </h1>
-            <div className="text-sm tracking-widest mt-1 text-center uppercase" style={{ fontSize: 'clamp(10px, 1.2vw, 13px)' }}>
+          {/* Center Title */}
+          <div
+            className="text-center font-sans relative z-10 flex-1"
+            style={{ minWidth: 0 }}
+          >
+            <h1
+              className="font-black uppercase leading-tight text-center"
+              style={{
+                fontSize: 'clamp(16px, 1.8vw, 28px)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+            >
               INTERACTIVE ELECTRONIC TECHNICAL MANUAL
+            </h1>
+
+            <div
+              className="text-sm tracking-widest mt-1 text-center uppercase"
+              style={{
+                fontSize: 'clamp(10px, 1.5vw, 16px)',
+                color: '#e67339',
+                textShadow: '0px 0px 8px rgba(255,255,255,2)'
+              }}
+            >
+              FEILD TELEPHONE SET WITH MAGNETO AND AUTO MODE (RFT1001)
             </div>
           </div>
 
-          {/* Version top-right */}
-          <div className="relative z-10 text-right" style={{ minWidth: 120 }}>
-            <div className="text-xs font-mono text-[#0ea5e9] font-semibold">RFT1001 IETM v1.10</div>
+          {/* Version + Volume Controls */}
+          <div
+            className="relative z-10 flex flex-col items-end gap-2"
+            style={{ minWidth: 140 }}
+          >
+            <div
+              className="text-xs font-mono text-[#001570] font-semibold"
+              style={{
+                fontSize: 'clamp(10px, 1.5vw, 12px)',
+                transform: 'translateY(-22px)'
+              }}
+            >
+              RFT1001 IETM v1.10
+            </div>
+
+            <div
+              className="flex items-center gap-2"
+              style={{ transform: 'translateY(-10px)' }}
+            >
+              <button
+                onClick={decreaseVolume}
+                title="Decrease Speech Volume"
+                className="w-9 h-9 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
+              >
+                −
+              </button>
+
+              <button
+                onClick={increaseVolume}
+                title="Increase Speech Volume"
+                className="w-9 h-9 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
+              >
+                +
+              </button>
+
+              {/* Volume Level Indicator */}
+
+              <div
+                className="px-3 py-1 rounded-full bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700"
+              >
+                Volume: {Math.round(speechVolume * 100)}%
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1213,7 +1421,7 @@ export default function App() {
             </div>
             
             {/* Explorable scrollable tree box */}
-            <div className="flex-grow overflow-y-auto pr-1 space-y-1">
+            <div className="flex-grow overflow-y-auto overflow-x-hidden pr-1 space-y-1">
               {documentStructure.map(node => renderTreeItem(node))}
             </div>
 
@@ -1232,96 +1440,62 @@ export default function App() {
 
             {/* Quick terminal quick-stats overview (anchored to bottom) */}
             <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-auto p-3 text-xs font-sans text-left text-neutral-600 space-y-1.5">
-              <span className="font-bold text-neutral-800 border-b border-neutral-100 block pb-1 mb-1.5 text-xs uppercase tracking-wider">Active Document</span>
-              <div className="text-[#0ea5e9] truncate font-semibold text-[13px]" title={manualsInfo[activeManualId]?.title}>
-                {manualsInfo[activeManualId]?.title}
+              <div
+                className="text-xs font-normal truncate"
+                title={`Active Document: ${manualsInfo[activeManualId]?.title}`}
+              >
+                <span className="font-bold text-neutral-800">Active Document:</span>{" "}
+                <span className="text-[#0ea5e9] font-semibold">
+                  {manualsInfo[activeManualId]?.title}
+                </span>
               </div>
               <div className="flex justify-between text-xs pt-1">
-                <span className="text-neutral-500">Total Pages:</span>
+                <span className="text-neutral-500 font-bold">Total Pages:</span>
                 <span className="text-neutral-800 font-semibold">{totalPagesInManual}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-neutral-500">Current Page:</span>
-                <span className="text-neutral-800 font-semibold">
-                  {viewMode === 'single' 
-                    ? (currentManualPages[currentPageIndex]?.pageNumber ?? '')
-                    : (currentManualPages[currentPairIndex * 2 + 1]?.pageNumber 
-                        ? `${currentManualPages[currentPairIndex * 2]?.pageNumber} - ${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber}`
-                        : (currentManualPages[currentPairIndex * 2]?.pageNumber ?? ''))
-                  }
-                </span>
               </div>
             </div>
           </div>
 
+          <button
+            onClick={() => setShowMainApp(false)}
+            className="absolute top-2 left-2 z-50 w-7 h-7 flex items-center justify-center border border-gray-400 bg-white hover:bg-gray-100 rounded-sm text-sm font-bold transition-colors shadow-sm"
+            title="Return to Cover Page"
+          >
+            ←
+          </button>
+
+
+
+
           {/* RIGHT COLUMN: PDF VIEWING PLATFORM */}
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
             
-            {/* VIEWING TOOLBAR - TOP POSITION */}
-            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-wrap items-center justify-start shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
-              {/* GROUP 1: Prev / Page / Next */}
-              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
-              
-                <div className="flex items-center gap-2">
-                {/* Prev Button */}
-                <button 
-                  id="prev_page_btn"
-                  onClick={handlePrevPage}
-                  disabled={viewMode === 'single' ? currentPageIndex === 0 : currentPairIndex === 0}
-                  className="flex items-center gap-1 text-sm font-semibold border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-805 disabled:opacity-40 disabled:hover:bg-white h-8 px-3 rounded shadow-sm cursor-pointer disabled:cursor-not-allowed select-none transition-colors duration-150"
-                  title="Previous"
-                >
-                  <ArrowLeft size={13} />
-                  <span className="hidden sm:inline">Prev</span>
-                </button>
-
-                {/* Current Page numbering */}
-                <div className="bg-neutral-50 border border-neutral-200 px-1 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center whitespace-nowrap" style={{ minWidth: '48px', maxWidth: '90px' }}>
-                  {viewMode === 'single' 
-                    ? currentManualPages[currentPageIndex]?.pageNumber || ''
-                    : `Page ${currentManualPages[currentPairIndex * 2]?.pageNumber || ''}-${currentManualPages[currentPairIndex * 2 + 1]?.pageNumber || currentManualPages[currentPairIndex * 2]?.pageNumber || ''}`
-                  }
-                </div>
-
-                {/* Next Button */}
-                <button 
-                  id="next_page_btn"
-                  onClick={handleNextPage}
-                  disabled={viewMode === 'single' ? currentPageIndex >= totalPagesInManual - 1 : currentPairIndex >= totalPairs - 1}
-                  className="flex items-center gap-1 text-sm font-semibold border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-805 disabled:opacity-40 disabled:hover:bg-white h-8 px-3 rounded shadow-sm cursor-pointer disabled:cursor-not-allowed select-none transition-colors duration-150"
-                  title="Next"
-                >
-                  <span className="hidden sm:inline">Next</span>
-                  <ArrowRight size={13} />
-                </button>
-                </div>
-              </div>
-
-              {/* GROUP 2: View Mode (Single/Double) */}
-              <div className="viewer-toolbar-group flex items-center gap-3 flex-shrink-0">
+            {/* VIEWING TOOLBAR - Top: left (view/zoom), center (page navigation), right (search) */}
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-nowrap items-center relative shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
+              {/* LEFT: View mode + Zoom controls */}
+              <div className="viewer-toolbar-group flex items-center gap-2 sm:gap-3 lg:gap-4 flex-shrink-0 relative z-10">
                 {/* View Mode Selection Control */}
                 <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm h-8 select-none font-sans bg-white items-center">
                   <button 
                     onClick={() => handleViewModeChange('single')}
-                    className={`px-3 text-sm font-semibold h-full transition-colors ${viewMode === 'single' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-r border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
+                    className={`px-3 text-sm font-semibold h-full transition-colors ${currentViewMode === 'single' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-r border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
                     title="Single Page View"
                   >
-                    Single Page
+                    Single
                   </button>
                   <div className="w-px h-full bg-neutral-200" />
                   <button 
                     onClick={() => handleViewModeChange('double')}
-                    className={`px-3 text-sm font-semibold h-full transition-colors ${viewMode === 'double' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-l border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
+                    disabled={isPdfManual && pdfPagesMap[activeManualId] && pdfPagesMap[activeManualId].length === 1}
+                    className={`px-3 text-sm font-semibold h-full transition-colors ${currentViewMode === 'double' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-l border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'} disabled:opacity-50 disabled:cursor-not-allowed`}
                     title="Double Page View"
                   >
-                    Double Page
+                    Double
                   </button>
                 </div>
-              </div>
 
-              {/* GROUP 3: Zoom controls + Reset */}
-              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
-                <div className="flex items-center gap-1.5 font-sans">
+                {/* Zoom controls + Reset */}
+                <div className="flex items-center gap-2">
                   <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom</span>
                   <button 
                     onClick={handleZoomOut}
@@ -1342,21 +1516,45 @@ export default function App() {
                   >
                     +
                   </button>
+
+                  <button 
+                    id="reset_zoom_btn"
+                    onClick={handleResetZoom}
+                    className="flex items-center gap-1.5 text-sm font-semibold border border-neutral-200 bg-white hover:bg-neutral-50 h-8 px-3 rounded shadow-sm cursor-pointer transition-colors duration-150"
+                    title="Reset Zoom to 100%"
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                </div>
+              </div>
+
+              {/* CENTER: Page navigation (prev, current, next) */}
+              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 justify-center flex-1 min-w-0">
+                <button
+                  type="button"
+                  onClick={handlePrevPage}
+                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                  title="Previous Page"
+                >
+                  <ArrowLeft size={14} />
+                </button>
+
+                  <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center whitespace-nowrap" style={{ minWidth: '80px', whiteSpace: 'nowrap' }}>
+                  {pageLabel}
                 </div>
 
-                <button 
-                  id="reset_zoom_btn"
-                  onClick={handleResetZoom}
-                  className="flex items-center gap-1.5 text-sm font-semibold border border-neutral-200 bg-white hover:bg-neutral-50 h-8 px-3 rounded shadow-sm cursor-pointer transition-colors duration-150"
-                  title="Reset Zoom to 100%"
+                <button
+                  type="button"
+                  onClick={handleNextPage}
+                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                  title="Next Page"
                 >
-                  <RotateCcw size={13} />
-                  <span>Reset</span>
+                  <ArrowRight size={14} />
                 </button>
               </div>
 
-              {/* Search function input field */}
-              <div className="viewer-toolbar-group flex items-center gap-2 flex-shrink-0">
+              {/* RIGHT: Search function input field (keeps existing behavior) */}
+              <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 flex-shrink-0 relative z-10">
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1">
                   <div className="relative" style={{ minWidth: 0 }}>
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
@@ -1369,7 +1567,7 @@ export default function App() {
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search"
                       className="h-8 pl-8 pr-2 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors w-auto"
-                      style={{ minWidth: '48px', maxWidth: '140px' }}
+                      style={{ minWidth: '20px', maxWidth: 'clamp(120px, 12vw, 180px)' }}
                     />
                   </div>
                   <button 
@@ -1413,15 +1611,14 @@ export default function App() {
             {/* MAIN PDF VIEW AREA - ACTIVE CHANNELS IN MIDDLE */}
             <div className="flex-grow border border-neutral-200 rounded-lg flex flex-col min-h-0 relative overflow-hidden bg-[#edf0f2]">
               {/* Actual Dual-Page Render Arena */}
-                <div 
-                ref={scrollContainerRef}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }}
-                className={`overflow-auto p-2 relative flex select-none bg-[#edf0f2] flex-grow min-h-0 ${isPanning ? 'cursor-grabbing select-none' : (zoomLevel > 100 ? 'cursor-grab' : '')}`}
-                style={{ scrollbarGutter: 'stable', perspective: 1500 }}
-              >
+                <div
+                  ref={scrollContainerRef}
+                  className="flex-1 overflow-y-auto overflow-x-hidden"
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={handleMouseUp}
+                  onMouseLeave={handleMouseUp}
+                >
                 
                 {/* Search error alert dialog */}
                 {searchError && (
@@ -1449,479 +1646,317 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Dynamic Viewport Layout List with Framer Motion Page Turn Transitions */}
-                <div className="m-auto min-w-max min-h-max flex justify-center items-center py-2">
-                  {viewMode === 'single' ? (
-                    <AnimatePresence mode="wait" custom={direction} initial={false}>
-                      {currentManualPages[currentPageIndex] && (
-                        <motion.div
-                          key={isDraggingSlider ? `${activeManualId}-dragging` : `${activeManualId}-${currentPageIndex}`}
-                          custom={{ direction, isDraggingSlider }}
-                          variants={pageVariants}
-                          initial="initial"
-                          animate="animate"
-                          exit="exit"
-                          className="flex flex-col justify-center items-center"
+                {/* PDF pages rendered in continuous vertical flow (scroll-based) */}
+                <div ref={pdfContainerRef} className="m-auto w-full py-2">
+                  <div className="w-full relative overflow-hidden">
+                    <div
+                      ref={panLayerRef}
+                      style={{
+                        transform: `translate(${pan.x}px, ${pan.y}px)`,
+                        transformOrigin: "top left",
+                        width: "max-content",
+                        display: "inline-block"
+                      }}
+>
+                  {
+                    // Precompute stable widths so the grid keeps exact spacing on resize
+                    (() => {
+                      const baseWidthForPdf = isPdfManual
+                        ? ((currentViewMode as any) === 'single' ? safeContainerWidth : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
+                        : safeContainerWidth;
+                      const visualWidthForGrid = baseWidthForPdf * (zoomLevel / 100);
+                      const PAGE_GAP_PX = 20; // keep gap-20 equivalent (5rem ~= 80px)
+
+                      if (currentViewMode === 'single') {
+                        return (
+                          <div className="flex flex-col items-center gap-6 w-full">
+                            {(!currentManualPages || !Array.isArray(currentManualPages)) ? (
+                              <div className="w-full py-20 text-center text-neutral-500">Loading document...</div>
+                            ) : currentManualPages.map((page, idx) => {
+                              const baseWidth = isPdfManual
+                                ? ((currentViewMode as any) === 'single'
+                                    ? safeContainerWidth
+                                    : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
+                                : safeContainerWidth;
+
+                              const visualWidth = baseWidth * (zoomLevel / 100);
+                              
+                              return (
+                                <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
+                                  <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (zoomLevel / 100))}px` }}>
+                                    {isPdfManual ? (
+                                      loadingManuals[activeManualId] ? (
+                                        <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
+                                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
+                                          <span>LOADING PDF...</span>
+                                        </div>
+                                      ) : pdfDocsMap[activeManualId] ? (
+                                        <div className="w-full flex items-center justify-center">
+                                          <div style={{ width: `${visualWidth}px` }} className="relative">
+                                            <PdfPageRenderer
+                                              pdfDoc={pdfDocsMap[activeManualId]}
+                                              pageNumber={page.pageNumber}
+                                              zoomLevel={zoomLevel}
+                                              activeSearchTerm={activeSearchTerm}
+                                              activeMatchIndexOnPage={
+                                                selectedResult && selectedResult.pageNumber === page.pageNumber
+                                                  ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                  : -1
+                                              }
+                                              width={Math.max(1, baseWidth)}
+                                              padding={0}
+                                            />
+                                          </div>
+                                          {/* OCR overlay for this page */}
+                                          {page?.isImageBased && page?.paragraphs && page?.paragraphs.length > 0 && activeSearchTerm && (
+                                            <div className="absolute left-1/2 translate-x-[-50%] bottom-4 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text" style={{ width: `${Math.min(visualWidth, 560)}px` }}>
+                                              <div className="text-[9px] font-mono font-bold text-yellow-400 mb-1 flex justify-between">
+                                                <span>OCR TEXT CONTENT (SCANNED PAGE)</span>
+                                                <span>{page.paragraphs.filter(p => p.toLowerCase().includes(activeSearchTerm.toLowerCase())).length} occurrences</span>
+                                              </div>
+                                              <div className="space-y-1">
+                                                {page.paragraphs.map((line, lIdx) => {
+                                                  if (!line.toLowerCase().includes(activeSearchTerm.toLowerCase())) return null;
+                                                  return (
+                                                    <div key={lIdx} className="border-l-2 border-yellow-400 pl-1.5 py-0.5">
+                                                      {highlightMatches(line, activeSearchTerm, isSelectedResult(page.pageNumber, 'Technical Body', line))}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <div className="flex-grow flex items-center justify-center text-xs text-red-500 font-semibold min-h-[200px]">
+                                          Failed to load PDF document
+                                        </div>
+                                      )
+                                    ) : (
+                                      <div>
+                                        <div className="border-b border-gray-800 pb-2 mb-4 flex justify-between items-center text-[10px] font-mono text-gray-500">
+                                          <span>ELCOM RFT1001 IETM</span>
+                                          <span>P. {page.pageNumber}</span>
+                                        </div>
+
+                                        <h2 className="text-xs font-mono font-bold text-gray-900 tracking-wide mb-1">
+                                          {highlightMatches(page.sectionTitle, activeSearchTerm)}
+                                        </h2>
+                                        {page.subTitle && (
+                                          <h3 className="text-[11px] font-mono text-blue-900 border-b border-dashed border-gray-300 pb-1 mb-3">
+                                            {highlightMatches(page.subTitle, activeSearchTerm)}
+                                          </h3>
+                                        )}
+
+                                        <div className="space-y-3 font-serif text-[11px] leading-relaxed text-gray-800 text-justify">
+                                          {page.paragraphs.map((p, pIdx) => (
+                                            <p key={pIdx}>
+                                              {highlightMatches(p, activeSearchTerm)}
+                                            </p>
+                                          ))}
+                                        </div>
+
+                                        {page.diagramType && (
+                                          <div className="mt-4">
+                                            <EngineeringDiagram type={page.diagramType} />
+                                          </div>
+                                        )}
+
+                                        {page.table && (
+                                          <div className="mt-4 win-border-sunken bg-white p-1 overflow-x-auto">
+                                            <table className="w-full text-left font-mono text-[9px] border-collapse min-w-[300px]">
+                                              <thead>
+                                                <tr className="bg-gray-200 text-gray-900 border-b border-gray-400 font-bold">
+                                                  {page.table.headers.map((h, hIdx) => (
+                                                    <th key={hIdx} className="p-1 px-1.5 border border-gray-300">{h}</th>
+                                                  ))}
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {page.table.rows.map((row, rIdx) => (
+                                                  <tr key={rIdx} className="hover:bg-blue-50 border-b border-gray-200">
+                                                    {row.map((cell, cIdx) => (
+                                                      <td key={cIdx} className="p-1 px-1.5 border border-gray-200 text-gray-800">
+                                                        {highlightMatches(cell, activeSearchTerm)}
+                                                      </td>
+                                                    ))}
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {!isPdfManual && (
+                                      <div className="border-t border-gray-300 pt-2 mt-4 text-[9px] font-mono text-gray-400 flex justify-between select-none">
+                                        <span>CONFIDENTIAL - MIL-USE</span>
+                                        <span>ELCOM INNOVATIONS</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      }
+
+                      // Double-page grid mode: explicit column sizes to preserve gap on resize
+                      return (
+                        <div
+                          className="w-full"
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: `repeat(2, ${Math.max(1, visualWidthForGrid)}px)`,
+                            columnGap: `${PAGE_GAP_PX}px`,
+                            justifyContent: 'center',
+                            rowGap: '32px'
+                          }}
                         >
-                          <div 
-                            className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
-                            style={isPdfManual ? { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
-                            } : { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
-                              minHeight: `${540 * (zoomLevel / 100)}px`,
-                              boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
-                            }}
-                          >
-                            {isPdfManual ? (
-                              loadingManuals[activeManualId] ? (
-                                <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[400px]">
-                                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
-                                  <span>LOADING ACTUAL PDF...</span>
-                                </div>
-                              ) : pdfDocsMap[activeManualId] ? (
-                                <div className="flex-grow flex flex-col min-h-0 w-full h-full">
-                                  <div className="flex-grow flex items-center justify-center min-h-0 w-full h-full relative">
-                                    <PdfPageRenderer 
-                                      pdfDoc={pdfDocsMap[activeManualId]}
-                                      pageNumber={currentManualPages[currentPageIndex].pageNumber}
-                                      zoomLevel={zoomLevel}
-                                      activeSearchTerm={activeSearchTerm}
-                                      activeMatchIndexOnPage={
-                                        selectedResult && selectedResult.pageNumber === currentManualPages[currentPageIndex].pageNumber
-                                          ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPageIndex].pageNumber).length
-                                          : -1
-                                      }
-                                      width={PDF_BASE_WIDTH}
-                                      padding={0}
-                                    />
-                                    {/* OCR text overlay */}
-                                    {currentManualPages[currentPageIndex]?.isImageBased && currentManualPages[currentPageIndex]?.paragraphs && currentManualPages[currentPageIndex]?.paragraphs.length > 0 && activeSearchTerm && (
-                                      <div className="absolute inset-x-2 bottom-2 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text">
-                                        <div className="text-[9px] font-mono font-bold text-yellow-400 mb-1 flex justify-between">
-                                          <span>OCR TEXT CONTENT (SCANNED PAGE)</span>
-                                          <span>{currentManualPages[currentPageIndex].paragraphs.filter(p => p.toLowerCase().includes(activeSearchTerm.toLowerCase())).length} occurrences</span>
-                                        </div>
-                                        <div className="space-y-1">
-                                          {currentManualPages[currentPageIndex].paragraphs.map((line, lIdx) => {
-                                            if (!line.toLowerCase().includes(activeSearchTerm.toLowerCase())) return null;
-                                            return (
-                                              <div key={lIdx} className="border-l-2 border-yellow-400 pl-1.5 py-0.5">
-                                                {highlightMatches(line, activeSearchTerm, isSelectedResult(currentManualPages[currentPageIndex].pageNumber, 'Technical Body', line))}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
+                          {(!currentManualPages || !Array.isArray(currentManualPages)) ? (
+                            <div className="w-full py-20 text-center text-neutral-500">Loading document...</div>
+                          ) : currentManualPages.map((page, idx) => {
+                            const baseWidth = isPdfManual
+                              ? ((currentViewMode as any) === 'single'
+                                  ? safeContainerWidth
+                                  : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
+                              : safeContainerWidth;
+
+                            const visualWidth = baseWidth * (zoomLevel / 100);
+                            
+                            return (
+                              <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
+                                <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (zoomLevel / 100))}px` }}>
+                                  {isPdfManual ? (
+                                    loadingManuals[activeManualId] ? (
+                                      <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
+                                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
+                                        <span>LOADING PDF...</span>
                                       </div>
-                                    )}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex-grow flex items-center justify-center text-xs text-red-500 font-semibold min-h-[400px]">
-                                  Failed to load PDF document
-                                </div>
-                              )
-                            ) : (
-                              <div>
-                                <div className="border-b border-gray-800 pb-2 mb-4 flex justify-between items-center text-[10px] font-mono text-gray-500">
-                                  <span>ELCOM RFT1001 IETM</span>
-                                  <span>P. {currentManualPages[currentPageIndex].pageNumber}</span>
-                                </div>
-
-                                <h2 className="text-xs font-mono font-bold text-gray-900 tracking-wide mb-1">
-                                  {highlightMatches(currentManualPages[currentPageIndex].sectionTitle, activeSearchTerm)}
-                                </h2>
-                                {currentManualPages[currentPageIndex].subTitle && (
-                                  <h3 className="text-[11px] font-mono text-blue-900 border-b border-dashed border-gray-300 pb-1 mb-3">
-                                    {highlightMatches(currentManualPages[currentPageIndex].subTitle, activeSearchTerm)}
-                                  </h3>
-                                )}
-
-                                <div className="space-y-3 font-serif text-[11px] leading-relaxed text-gray-800 text-justify">
-                                  {currentManualPages[currentPageIndex].paragraphs.map((p, pIdx) => (
-                                    <p key={pIdx}>
-                                      {highlightMatches(p, activeSearchTerm)}
-                                    </p>
-                                  ))}
-                                </div>
-
-                                {currentManualPages[currentPageIndex].diagramType && (
-                                  <div className="mt-4">
-                                    <EngineeringDiagram type={currentManualPages[currentPageIndex].diagramType} />
-                                  </div>
-                                )}
-
-                                {currentManualPages[currentPageIndex].table && (
-                                  <div className="mt-4 win-border-sunken bg-white p-1 overflow-x-auto">
-                                    <table className="w-full text-left font-mono text-[9px] border-collapse min-w-[300px]">
-                                      <thead>
-                                        <tr className="bg-gray-200 text-gray-900 border-b border-gray-400 font-bold">
-                                          {currentManualPages[currentPageIndex].table.headers.map((h, hIdx) => (
-                                            <th key={hIdx} className="p-1 px-1.5 border border-gray-300">{h}</th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {currentManualPages[currentPageIndex].table.rows.map((row, rIdx) => (
-                                          <tr key={rIdx} className="hover:bg-blue-50 border-b border-gray-200">
-                                            {row.map((cell, cIdx) => (
-                                              <td key={cIdx} className="p-1 px-1.5 border border-gray-200 text-gray-800">
-                                                {highlightMatches(cell, activeSearchTerm)}
-                                              </td>
-                                            ))}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-
-                            {!isPdfManual && (
-                              <div className="border-t border-gray-300 pt-2 mt-4 text-[9px] font-mono text-gray-400 flex justify-between select-none">
-                                <span>CONFIDENTIAL - MIL-USE</span>
-                                <span>ELCOM INNOVATIONS</span>
-                              </div>
-                            )}
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  ) : (
-                    <AnimatePresence mode="wait" custom={direction} initial={false}>
-                      <motion.div
-                        key={isDraggingSlider ? `${activeManualId}-dragging` : `${activeManualId}-${currentPairIndex}`}
-                        custom={{ direction, isDraggingSlider }}
-                        variants={pageVariants}
-                        initial="initial"
-                        animate="animate"
-                        exit="exit"
-                        className="flex flex-row justify-center items-stretch gap-6"
-                      >
-                        {/* PAGE A */}
-                        {currentManualPages[currentPairIndex * 2] && (
-                          <div 
-                            className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
-                            style={isPdfManual ? { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
-                            } : { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
-                              minHeight: `${540 * (zoomLevel / 100)}px`,
-                              boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
-                            }}
-                          >
-                            {isPdfManual ? (
-                              loadingManuals[activeManualId] ? (
-                                <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[400px]">
-                                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
-                                  <span>LOADING...</span>
-                                </div>
-                              ) : pdfDocsMap[activeManualId] ? (
-                                <div className="flex-grow flex flex-col min-h-0 w-full h-full">
-                                  <div className="flex-grow flex items-center justify-center min-h-0 w-full h-full relative">
-                                    <PdfPageRenderer 
-                                      pdfDoc={pdfDocsMap[activeManualId]}
-                                      pageNumber={currentManualPages[currentPairIndex * 2].pageNumber}
-                                      zoomLevel={zoomLevel}
-                                      activeSearchTerm={activeSearchTerm}
-                                      activeMatchIndexOnPage={
-                                        selectedResult && selectedResult.pageNumber === currentManualPages[currentPairIndex * 2].pageNumber
-                                          ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPairIndex * 2].pageNumber).length
-                                          : -1
-                                      }
-                                      width={PDF_BASE_WIDTH}
-                                      padding={0}
-                                    />
-                                    {/* OCR text overlay */}
-                                    {currentManualPages[currentPairIndex * 2]?.isImageBased && currentManualPages[currentPairIndex * 2]?.paragraphs && currentManualPages[currentPairIndex * 2]?.paragraphs.length > 0 && activeSearchTerm && (
-                                      <div className="absolute inset-x-2 bottom-2 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text">
-                                        <div className="text-[9px] font-mono font-bold text-yellow-400 mb-1 flex justify-between">
-                                          <span>OCR TEXT CONTENT (SCANNED PAGE)</span>
-                                          <span>{currentManualPages[currentPairIndex * 2].paragraphs.filter(p => p.toLowerCase().includes(activeSearchTerm.toLowerCase())).length} occurrences</span>
+                                    ) : pdfDocsMap[activeManualId] ? (
+                                      <div className="w-full flex items-center justify-center">
+                                        <div style={{ width: `${visualWidth}px` }} className="relative">
+                                          <PdfPageRenderer
+                                            pdfDoc={pdfDocsMap[activeManualId]}
+                                            pageNumber={page.pageNumber}
+                                            zoomLevel={zoomLevel}
+                                            activeSearchTerm={activeSearchTerm}
+                                            activeMatchIndexOnPage={
+                                              selectedResult && selectedResult.pageNumber === page.pageNumber
+                                                ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                : -1
+                                            }
+                                            width={Math.max(1, baseWidth)}
+                                            padding={0}
+                                          />
                                         </div>
-                                        <div className="space-y-1">
-                                          {currentManualPages[currentPairIndex * 2].paragraphs.map((line, lIdx) => {
-                                            if (!line.toLowerCase().includes(activeSearchTerm.toLowerCase())) return null;
-                                            return (
-                                              <div key={lIdx} className="border-l-2 border-yellow-400 pl-1.5 py-0.5">
-                                                {highlightMatches(line, activeSearchTerm, isSelectedResult(currentManualPages[currentPairIndex * 2].pageNumber, 'Technical Body', line))}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
+                                        {/* OCR overlay for this page */}
+                                        {page?.isImageBased && page?.paragraphs && page?.paragraphs.length > 0 && activeSearchTerm && (
+                                          <div className="absolute left-1/2 translate-x-[-50%] bottom-4 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text" style={{ width: `${Math.min(visualWidth, 560)}px` }}>
+                                            <div className="text-[9px] font-mono font-bold text-yellow-400 mb-1 flex justify-between">
+                                              <span>OCR TEXT CONTENT (SCANNED PAGE)</span>
+                                              <span>{page.paragraphs.filter(p => p.toLowerCase().includes(activeSearchTerm.toLowerCase())).length} occurrences</span>
+                                            </div>
+                                            <div className="space-y-1">
+                                              {page.paragraphs.map((line, lIdx) => {
+                                                if (!line.toLowerCase().includes(activeSearchTerm.toLowerCase())) return null;
+                                                return (
+                                                  <div key={lIdx} className="border-l-2 border-yellow-400 pl-1.5 py-0.5">
+                                                    {highlightMatches(line, activeSearchTerm, isSelectedResult(page.pageNumber, 'Technical Body', line))}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
-                                    )}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex-grow flex items-center justify-center text-xs text-red-500 font-semibold min-h-[400px]">
-                                  Failed to load PDF document
-                                </div>
-                              )
-                            ) : (
-                              <div>
-                                <div className="border-b border-gray-800 pb-2 mb-4 flex justify-between items-center text-[10px] font-mono text-gray-500">
-                                  <span>ELCOM RFT1001 IETM</span>
-                                  <span>P. {currentManualPages[currentPairIndex * 2].pageNumber}</span>
-                                </div>
-
-                                <h2 className="text-xs font-mono font-bold text-gray-900 tracking-wide text-left mb-1">
-                                  {highlightMatches(currentManualPages[currentPairIndex * 2].sectionTitle, activeSearchTerm)}
-                                </h2>
-                                {currentManualPages[currentPairIndex * 2].subTitle && (
-                                  <h3 className="text-[11px] font-mono text-blue-900 border-b border-dashed border-gray-300 pb-1 mb-3">
-                                    {highlightMatches(currentManualPages[currentPairIndex * 2].subTitle, activeSearchTerm)}
-                                  </h3>
-                                )}
-
-                                <div className="space-y-3 font-serif text-[11px] leading-relaxed text-gray-800 text-justify">
-                                  {currentManualPages[currentPairIndex * 2].paragraphs.map((p, pIdx) => (
-                                    <p key={pIdx}>
-                                      {highlightMatches(p, activeSearchTerm)}
-                                    </p>
-                                  ))}
-                                </div>
-
-                                {currentManualPages[currentPairIndex * 2].diagramType && (
-                                  <div className="mt-4">
-                                    <EngineeringDiagram type={currentManualPages[currentPairIndex * 2].diagramType} />
-                                  </div>
-                                )}
-
-                                {currentManualPages[currentPairIndex * 2].table && (
-                                  <div className="mt-4 win-border-sunken bg-white p-1 overflow-x-auto">
-                                    <table className="w-full text-left font-mono text-[9px] border-collapse min-w-[300px]">
-                                      <thead>
-                                        <tr className="bg-gray-200 text-gray-900 border-b border-gray-400 font-bold">
-                                          {currentManualPages[currentPairIndex * 2].table.headers.map((h, hIdx) => (
-                                            <th key={hIdx} className="p-1 px-1.5 border border-gray-300">{h}</th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {currentManualPages[currentPairIndex * 2].table.rows.map((row, rIdx) => (
-                                          <tr key={rIdx} className="hover:bg-blue-50 border-b border-gray-200">
-                                            {row.map((cell, cIdx) => (
-                                              <td key={cIdx} className="p-1 px-1.5 border border-gray-200 text-gray-800">
-                                                {highlightMatches(cell, activeSearchTerm)}
-                                              </td>
-                                            ))}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-
-                            {!isPdfManual && (
-                              <div className="border-t border-gray-300 pt-2 mt-4 text-[9px] font-mono text-gray-400 flex justify-between select-none">
-                                <span>CONFIDENTIAL - MIL-USE</span>
-                                <span>ELCOM INNOVATIONS</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* PAGE B */}
-                        {currentManualPages[currentPairIndex * 2 + 1] ? (
-                          <div 
-                            className={isPdfManual ? "relative select-text" : "bg-white border border-neutral-200 text-black p-8 text-left relative flex flex-col justify-between rounded-md shadow-md"}
-                            style={isPdfManual ? { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`
-                            } : { 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
-                              minHeight: `${540 * (zoomLevel / 100)}px`,
-                              boxShadow: '0 4px 12px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)'
-                            }}
-                          >
-                            {isPdfManual ? (
-                              loadingManuals[activeManualId] ? (
-                                <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[400px]">
-                                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0ea5e9] mb-4"></div>
-                                  <span>LOADING...</span>
-                                </div>
-                              ) : pdfDocsMap[activeManualId] ? (
-                                <div className="flex-grow flex flex-col min-h-0 w-full h-full">
-                                  <div className="flex-grow flex items-center justify-center min-h-0 w-full h-full relative">
-                                    <PdfPageRenderer 
-                                      pdfDoc={pdfDocsMap[activeManualId]}
-                                      pageNumber={currentManualPages[currentPairIndex * 2 + 1].pageNumber}
-                                      zoomLevel={zoomLevel}
-                                      activeSearchTerm={activeSearchTerm}
-                                      activeMatchIndexOnPage={
-                                        selectedResult && selectedResult.pageNumber === currentManualPages[currentPairIndex * 2 + 1].pageNumber
-                                          ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === currentManualPages[currentPairIndex * 2 + 1].pageNumber).length
-                                          : -1
-                                      }
-                                      width={PDF_BASE_WIDTH}
-                                      padding={0}
-                                    />
-                                    {/* OCR text overlay */}
-                                    {currentManualPages[currentPairIndex * 2 + 1]?.isImageBased && currentManualPages[currentPairIndex * 2 + 1]?.paragraphs && currentManualPages[currentPairIndex * 2 + 1]?.paragraphs.length > 0 && activeSearchTerm && (
-                                      <div className="absolute inset-x-2 bottom-2 bg-neutral-900/95 text-white p-2.5 rounded shadow-lg font-sans text-[10px] leading-normal z-20 max-h-28 overflow-y-auto border border-neutral-700 text-left select-text">
-                                        <div className="text-[9px] font-mono font-bold text-yellow-400 mb-1 flex justify-between">
-                                          <span>OCR TEXT CONTENT (SCANNED PAGE)</span>
-                                          <span>{currentManualPages[currentPairIndex * 2 + 1].paragraphs.filter(p => p.toLowerCase().includes(activeSearchTerm.toLowerCase())).length} occurrences</span>
-                                        </div>
-                                        <div className="space-y-1">
-                                          {currentManualPages[currentPairIndex * 2 + 1].paragraphs.map((line, lIdx) => {
-                                            if (!line.toLowerCase().includes(activeSearchTerm.toLowerCase())) return null;
-                                            return (
-                                              <div key={lIdx} className="border-l-2 border-yellow-400 pl-1.5 py-0.5">
-                                                {highlightMatches(line, activeSearchTerm, isSelectedResult(currentManualPages[currentPairIndex * 2 + 1].pageNumber, 'Technical Body', line))}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
+                                    ) : (
+                                      <div className="flex-grow flex items-center justify-center text-xs text-red-500 font-semibold min-h-[200px]">
+                                        Failed to load PDF document
                                       </div>
-                                    )}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex-grow flex items-center justify-center text-xs text-red-500 font-semibold min-h-[400px]">
-                                  Failed to load PDF document
-                                </div>
-                              )
-                            ) : (
-                              <div>
-                                <div className="border-b border-gray-800 pb-2 mb-4 flex justify-between items-center text-[10px] font-mono text-gray-500">
-                                  <span>ELCOM RFT1001 IETM</span>
-                                  <span>P. {currentManualPages[currentPairIndex * 2 + 1].pageNumber}</span>
-                                </div>
+                                    )
+                                  ) : (
+                                    <div>
+                                      <div className="border-b border-gray-800 pb-2 mb-4 flex justify-between items-center text-[10px] font-mono text-gray-500">
+                                        <span>ELCOM RFT1001 IETM</span>
+                                        <span>P. {page.pageNumber}</span>
+                                      </div>
 
-                                <h2 className="text-xs font-mono font-bold text-gray-900 tracking-wide text-left mb-1">
-                                  {highlightMatches(currentManualPages[currentPairIndex * 2 + 1].sectionTitle, activeSearchTerm)}
-                                </h2>
-                                {currentManualPages[currentPairIndex * 2 + 1].subTitle && (
-                                  <h3 className="text-[11px] font-mono text-blue-900 border-b border-dashed border-gray-300 pb-1 mb-3">
-                                    {highlightMatches(currentManualPages[currentPairIndex * 2 + 1].subTitle, activeSearchTerm)}
-                                  </h3>
-                                )}
+                                      <h2 className="text-xs font-mono font-bold text-gray-900 tracking-wide mb-1">
+                                        {highlightMatches(page.sectionTitle, activeSearchTerm)}
+                                      </h2>
+                                      {page.subTitle && (
+                                        <h3 className="text-[11px] font-mono text-blue-900 border-b border-dashed border-gray-300 pb-1 mb-3">
+                                          {highlightMatches(page.subTitle, activeSearchTerm)}
+                                        </h3>
+                                      )}
 
-                                <div className="space-y-3 font-serif text-[11px] leading-relaxed text-gray-800 text-justify">
-                                  {currentManualPages[currentPairIndex * 2 + 1].paragraphs.map((p, pIdx) => (
-                                    <p key={pIdx}>
-                                      {highlightMatches(p, activeSearchTerm)}
-                                    </p>
-                                  ))}
-                                </div>
-
-                                {currentManualPages[currentPairIndex * 2 + 1].diagramType && (
-                                  <div className="mt-4">
-                                    <EngineeringDiagram type={currentManualPages[currentPairIndex * 2 + 1].diagramType} />
-                                  </div>
-                                )}
-
-                                {currentManualPages[currentPairIndex * 2 + 1].table && (
-                                  <div className="mt-4 win-border-sunken bg-white p-1 overflow-x-auto">
-                                    <table className="w-full text-left font-mono text-[9px] border-collapse min-w-[300px]">
-                                      <thead>
-                                        <tr className="bg-gray-200 text-gray-900 border-b border-gray-400 font-bold">
-                                          {currentManualPages[currentPairIndex * 2 + 1].table.headers.map((h, hIdx) => (
-                                            <th key={hIdx} className="p-1 px-1.5 border border-gray-300">{h}</th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {currentManualPages[currentPairIndex * 2 + 1].table.rows.map((row, rIdx) => (
-                                          <tr key={rIdx} className="hover:bg-blue-50 border-b border-gray-200">
-                                            {row.map((cell, cIdx) => (
-                                              <td key={cIdx} className="p-1 px-1.5 border border-gray-200 text-gray-800">
-                                                {highlightMatches(cell, activeSearchTerm)}
-                                              </td>
-                                            ))}
-                                          </tr>
+                                      <div className="space-y-3 font-serif text-[11px] leading-relaxed text-gray-800 text-justify">
+                                        {page.paragraphs.map((p, pIdx) => (
+                                          <p key={pIdx}>
+                                            {highlightMatches(p, activeSearchTerm)}
+                                          </p>
                                         ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                                      </div>
 
-                            {!isPdfManual && (
-                              <div className="border-t border-gray-300 pt-2 mt-4 text-[9px] font-mono text-gray-400 flex justify-between select-none">
-                                <span>CONFIDENTIAL - MIL-USE</span>
-                                <span>ELCOM INNOVATIONS</span>
+                                      {page.diagramType && (
+                                        <div className="mt-4">
+                                          <EngineeringDiagram type={page.diagramType} />
+                                        </div>
+                                      )}
+
+                                      {page.table && (
+                                        <div className="mt-4 win-border-sunken bg-white p-1 overflow-x-auto">
+                                          <table className="w-full text-left font-mono text-[9px] border-collapse min-w-[300px]">
+                                            <thead>
+                                              <tr className="bg-gray-200 text-gray-900 border-b border-gray-400 font-bold">
+                                                {page.table.headers.map((h, hIdx) => (
+                                                  <th key={hIdx} className="p-1 px-1.5 border border-gray-300">{h}</th>
+                                                ))}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {page.table.rows.map((row, rIdx) => (
+                                                <tr key={rIdx} className="hover:bg-blue-50 border-b border-gray-200">
+                                                  {row.map((cell, cIdx) => (
+                                                    <td key={cIdx} className="p-1 px-1.5 border border-gray-200 text-gray-800">
+                                                      {highlightMatches(cell, activeSearchTerm)}
+                                                    </td>
+                                                  ))}
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {!isPdfManual && (
+                                    <div className="border-t border-gray-300 pt-2 mt-4 text-[9px] font-mono text-gray-400 flex justify-between select-none">
+                                      <span>CONFIDENTIAL - MIL-USE</span>
+                                      <span>ELCOM INNOVATIONS</span>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
-                            )}
-                          </div>
-                        ) : (
-                          /* Blank Page placeholder to preserve exact book styling for odd pagination if any */
-                          <div 
-                            className="bg-gray-400/20 border border-neutral-200 flex items-center justify-center text-gray-400 font-mono text-xs rounded-md shadow-md"
-                            style={{ 
-                              width: `${PDF_BASE_WIDTH * (zoomLevel / 100)}px`, 
-                              minHeight: `${540 * (zoomLevel / 100)}px` 
-                            }}
-                          >
-                            [ END OF VOLUME ]
-                          </div>
-                        )}
-                      </motion.div>
-                    </AnimatePresence>
-                  )}
+                            );
+                          })}
+                        </div>
+                      );
+                    })()
+                  }
+                    </div>
+                  </div>
                 </div>
 
               </div>
 
             </div>
 
-            {/* BOTTOM HORIZONTAL DRAGGABLE RAPID-NAVIGATION TRACK */}
-            <div ref={bottomTrackRef} className="bg-white border-t border-neutral-200 px-3 py-1.5 mx-0 mb-0 shadow-sm select-none font-sans shrink-0">
-              <div className="relative w-full h-[12px] flex items-center">
-                {/* Unfilled background track */}
-                <div className="absolute inset-x-0 h-[3px] bg-neutral-200 rounded-full pointer-events-none" />
-
-                {/* Colored active fill track */}
-                <div 
-                  className="h-[3px] bg-[#0ea5e9] rounded-full pointer-events-none absolute left-0" 
-                  style={{ 
-                    width: `${(sliderValue / Math.max(1, totalPagesInManual - 1)) * 100}%` 
-                  }}
-                />
-
-                {/* Range Slider control */}
-                <input 
-                  type="range"
-                  min={0}
-                  max={totalPagesInManual - 1}
-                  step={0.01}
-                  value={sliderValue}
-                  onMouseDown={() => setIsDraggingSlider(true)}
-                  onTouchStart={() => setIsDraggingSlider(true)}
-                  onMouseUp={() => {
-                    setIsDraggingSlider(false);
-                    handleDirectPageJump(Math.round(sliderValue));
-                  }}
-                  onTouchEnd={() => {
-                    setIsDraggingSlider(false);
-                    handleDirectPageJump(Math.round(sliderValue));
-                  }}
-                  onChange={(e) => {
-                    const floatVal = parseFloat(e.target.value);
-                    setSliderValue(floatVal);
-                    React.startTransition(() => {
-                      handleDirectPageJump(Math.round(floatVal));
-                    });
-                  }}
-                  className="custom-slider absolute w-full h-[24px] opacity-100 appearance-none bg-transparent cursor-pointer left-0 top-1/2 -translate-y-1/2"
-                  style={{
-                    WebkitAppearance: 'none'
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* LOWER STATUS STRIP */}
-            <div id="lower_status_bar" ref={lowerStatusRef} className="bg-neutral-50 border-t border-neutral-200 p-1.5 flex justify-end font-sans text-xs text-neutral-500 shrink-0 select-none rounded-b-lg">
-              <div className="border border-neutral-200 rounded-md bg-white px-3 py-1 font-bold text-[#0ea5e9] shadow-sm flex items-center">
-                {/* footer version removed per requirements */}
-              </div>
-            </div>
+            {/* Bottom controls removed per layout cleanup - keep PDF viewer as-is */}
 
           </div>
 

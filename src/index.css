@@ -82,16 +82,16 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f5f9;
+  background: #b6cfe1;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #50a0d1;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #000000;
 }
 
 /* Fallback/compatibility layout styles in case there are references */
@@ -281,13 +281,25 @@ input[type=range].custom-slider::-moz-range-track {
 
 /* Viewer toolbar grouping: ensure groups wrap as units and left-align when wrapped */
 #viewer_toolbar { align-content: flex-start; }
-.viewer-toolbar-group { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.viewer-toolbar-group { flex: 0 1 auto; display: flex; gap: 10px; align-items: center; white-space: nowrap; }
 .viewer-toolbar-group.flex-grow { flex: 1 1 auto; }
+
+/* Ensure the central toolbar group can take available space and keep items centered */
+#viewer_toolbar .viewer-toolbar-group:nth-child(2) { flex: 1 1 40%; justify-content: center; }
 
 @media (max-width: 700px) {
   /* Allow groups to stack but stay left-aligned */
   #viewer_toolbar { gap: 8px; }
   .viewer-toolbar-group { margin-right: 8px; }
+}
+
+@media (max-width: 520px) {
+  /* On very small screens, allow center to shrink and search to collapse */
+  #viewer_toolbar { padding: 8px; }
+  #viewer_toolbar .viewer-toolbar-group:nth-child(2) { flex-basis: 100%; order: 2; margin-top: 6px; }
+  #viewer_toolbar .viewer-toolbar-group:last-child { order: 3; }
+  #viewer_toolbar .viewer-toolbar-group:first-child { order: 1; }
+  #viewer_toolbar input[type="text"] { max-width: 120px; }
 }
 
 /* Hover information drawer */

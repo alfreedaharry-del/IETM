@@ -1365,7 +1365,7 @@ const decreaseVolume = () => {
           {/* Version + Volume Controls */}
           <div
             className="relative z-10 flex flex-col items-end gap-2"
-            style={{ minWidth: 140 }}
+            style={{ minWidth: 180, flexShrink: 0 }}
           >
             <div
               className="text-xs font-mono text-[#001570] font-semibold"
@@ -1399,10 +1399,8 @@ const decreaseVolume = () => {
 
               {/* Volume Level Indicator */}
 
-              <div
-                className="px-3 py-1 rounded-full bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700"
-              >
-                Volume: {Math.round(speechVolume * 100)}%
+              <div className="px-3 py-1 rounded-full bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700 w-[110px] text-center">
+                Volume: {String(Math.round(speechVolume * 100)).padStart(3, ' ')}%
               </div>
             </div>
           </div>

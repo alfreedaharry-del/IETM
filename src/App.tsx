@@ -9,9 +9,6 @@ import {
   Search, 
   ArrowLeft, 
   ArrowRight, 
-  ZoomIn, 
-  ZoomOut, 
-  RotateCcw, 
   HelpCircle,
   Clock,
   Printer,
@@ -253,6 +250,7 @@ const pageVariants = {
 
 export default function App() {
   // Global Navigation State
+
   const [showMainApp, setShowMainApp] = useState<boolean>(false);
   const [activeManualId, setActiveManualId] = useState<string>('');
   const [documentStructure, setDocumentStructure] = useState<DocumentSection[]>([]);
@@ -272,9 +270,11 @@ export default function App() {
   const [containerWidth, setContainerWidth] = useState(0);
   const safeContainerWidth = containerWidth || 800;
   const VIEW_FIT = {
-    single: 1.25,
-    double: 0.5,
+    single: 0.80,
+    double: 0.50,
   };
+
+
 
   // Measurement useLayoutEffect moved below after viewMode declaration to avoid TDZ
 
@@ -294,6 +294,7 @@ export default function App() {
     'tech-2': 'Scheduled maintenance procedures, inspections, and servicing requirements.',
     'tech-manual-3': 'Overhaul procedures, restoration activities, and major component servicing.',
     'tech-3': 'Overhaul procedures, restoration activities, and major component servicing.',
+    'tech-manual-4': 'It has 2 documents, covering Part Lists and Illustration of all the items.',
     'tech-4-1': 'Component identification, part references, and equipment breakdown structure.',
     'tech-4-2': 'Visual references, exploded views, and supporting graphical information.',
     'product-tree': 'System hierarchy, assemblies, subassemblies, and product structure relationships.'
@@ -379,6 +380,11 @@ const decreaseVolume = () => {
   const currentViewMode = (activeManualId ? viewModes[activeManualId] : undefined) as 'single' | 'double' | undefined;
   console.log("VIEW_MODE:", currentViewMode);
   const [zoomLevel, setZoomLevel] = useState<number>(100);
+  const [zoomInput, setZoomInput] = useState(String(zoomLevel));
+
+    useEffect(() => {
+    setZoomInput(String(zoomLevel));
+  }, [zoomLevel]);
   // Remove pagination indices: we use continuous vertical scroll instead
   const [direction, setDirection] = useState<'next' | 'prev'>('next');
 
@@ -447,8 +453,19 @@ const decreaseVolume = () => {
   const [loadingManuals, setLoadingManuals] = useState<Record<string, boolean>>({});
   // Track which pages have been requested/rendered (lazy load per-page)
   const [loadedPagesMap, setLoadedPagesMap] = useState<Record<string, Record<number, boolean>>>({});
-  // Debounced zoom to avoid thrashing renders during rapid zoom/resize
-  const [debouncedZoom, setDebouncedZoom] = useState<number>(zoomLevel);
+  // Make a small reduction at nominal 100% so the document has a little breathing room
+  const getZoomFactor = (z: number) => (z === 100 ? 0.96 : z / 100);
+
+  // Keep previous content width so we can preserve proportional horizontal scroll when zoom changes
+  const prevContentWidthRef = useRef<number | null>(null);
+  // Store previous scroll position for proportional restoration during zoom
+  const prevScrollLeftRef = useRef<number>(0);
+  // Pending scroll lock positions during zoom operations
+  const pendingScrollLockRef = useRef<{ top: number; left: number } | null>(null);
+  
+ 
+  // Transition lock to prevent competing viewport systems during zoom/view-mode changes
+  const isViewTransitioning = useRef<boolean>(false);
 
   const isPdfManual = pdfMapping[activeManualId] !== undefined;
   
@@ -463,12 +480,57 @@ const decreaseVolume = () => {
   const totalPagesInManual = currentManualPages.length;
   const totalPairs = Math.ceil(totalPagesInManual / 2);
 
-  // Synchronize sliderValue with the current position when not actively dragging
-  useEffect(() => {
-    // debounce zoom changes to avoid re-rendering all canvases frequently
-    const t = setTimeout(() => setDebouncedZoom(zoomLevel), 120);
-    return () => clearTimeout(t);
+
+  // Apply zoom while locking viewport positions
+  const applyZoom = (newZoom: number) => {
+    const container = scrollContainerRef.current;
+    if (container) {
+      // capture exact scroll positions only if not already capturing (preserve initial lock during drag)
+      if (!pendingScrollLockRef.current) pendingScrollLockRef.current = { top: container.scrollTop, left: container.scrollLeft };
+      // disable scroll-driven updates while zooming
+      isViewTransitioning.current = true;
+    } else {
+      pendingScrollLockRef.current = null;
+      isViewTransitioning.current = true;
+    }
+    setZoomLevel(newZoom);
+  };
+
+  // After the rendered zoom value updates (debouncedZoom), restore scrollbar positions exactly
+  useLayoutEffect(() => {
+    const restore = async () => {
+      const container = scrollContainerRef.current;
+      const pending = pendingScrollLockRef.current;
+      if (!pending || !container) {
+        isViewTransitioning.current = false;
+        pendingScrollLockRef.current = null;
+        return;
+      }
+
+      // Wait until container.scrollHeight stabilizes for a couple frames or timeout
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+
+      try {
+        container.scrollTop = pending.top;
+        container.scrollLeft = pending.left;
+      } catch (e) {
+        // ignore
+      }
+
+      pendingScrollLockRef.current = null;
+      isViewTransitioning.current = false;
+    };
+
+    restore();
   }, [zoomLevel]);
+
+
+
+
+  // Adjusted debounced zoom value (numeric percent) that applies the small 100% reduction
+  const adjustedZoom =
+    zoomLevel === 100 ? 96 : zoomLevel;
 
   // Helper: parse a single page on demand (incremental, non-blocking)
   const parsePage = async (manualId: string, pageNum: number) => {
@@ -531,38 +593,50 @@ const decreaseVolume = () => {
     // Synchronize sliderValue with the current position when not actively dragging
     useEffect(() => {
       if (isDraggingSlider) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
+      // Skip during zoom/view-mode transitions - transition lock prevents premature page calculations
+      if (isViewTransitioning.current) return;
+      const container = scrollContainerRef.current;
+      if (!container || !activeManualId) return;
 
-    const updateFromScroll = () => {
-      const pages = Array.from(container.querySelectorAll('[data-page-number]')) as HTMLElement[];
-      if (!pages || pages.length === 0) return;
+      // Only enable scroll-based tracking once the manual has finished loading and pages exist
+      const isLoading = loadingManuals[activeManualId];
+      if (isLoading || !currentManualPages || currentManualPages.length === 0) return;
 
-      const containerRect = container.getBoundingClientRect();
-      const containerCenter = containerRect.top + (containerRect.height / 2);
+      const updateFromScroll = () => {
+        // During zoom/view transitions, ignore scroll events to avoid coupling scrollbar to zoom
+        if (isViewTransitioning.current) return;
+        const pages = Array.from(container.querySelectorAll('[data-page-number]')) as HTMLElement[];
+        if (!pages || pages.length === 0) return;
 
-      let closestIdx = 0;
-      let minDist = Infinity;
+        const containerRect = container.getBoundingClientRect();
+        const containerCenter = containerRect.top + (containerRect.height / 2);
 
-      pages.forEach((el, idx) => {
-        const elRect = el.getBoundingClientRect();
-        const elCenter = elRect.top + (elRect.height / 2);
-        const dist = Math.abs(elCenter - containerCenter);
-        if (dist < minDist) {
-          minDist = dist;
-          closestIdx = idx;
-        }
-      });
+        let closestIdx = 0;
+        let minDist = Infinity;
 
-      setSliderValue(closestIdx);
-    };
+        pages.forEach((el, idx) => {
+          const elRect = el.getBoundingClientRect();
+          const elCenter = elRect.top + (elRect.height / 2);
+          const dist = Math.abs(elCenter - containerCenter);
+          if (dist < minDist) {
+            minDist = dist;
+            closestIdx = idx;
+          }
+        });
 
-    updateFromScroll();
-    const intervalId = window.setInterval(updateFromScroll, 250);
-    return () => clearInterval(intervalId);
-  }, [currentViewMode, totalPagesInManual, isDraggingSlider]);
+        setSliderValue(closestIdx);
+
+        // Don't change scroll positions during zoom; keep scrollbar as source-of-truth.
+      };
+
+      
+      container.addEventListener('scroll', updateFromScroll);
+
+      return () => {
+        container.removeEventListener('scroll', updateFromScroll);
+      };
+    }, [activeManualId, currentViewMode, totalPagesInManual, isDraggingSlider, loadingManuals, containerWidth]);
   
-
   // Generate systemic clock for status bar
   useEffect(() => {
     // Load XML configuration mapping documents to PDF files
@@ -863,11 +937,15 @@ const decreaseVolume = () => {
     };
   }, [activeManualId, pdfPagesMap, pdfDocsMap]);
 
-  // Reset pan whenever the active manual changes or zoom/layout changes
+  // Reset pan and scroll tracking refs whenever the active manual or view mode changes
   useEffect(() => {
     setPan({ x: 0, y: 0 });
     panOriginRef.current = { x: 0, y: 0 };
-  }, [activeManualId, zoomLevel, containerWidth, currentViewMode]);
+    // Reset scroll position tracking refs so horizontal centering works correctly on new manual
+    prevContentWidthRef.current = null;
+    prevScrollLeftRef.current = 0;
+    // Removed zoom anchor/restore refs to avoid automatic viewport repositioning during zoom
+  }, [activeManualId, currentViewMode]);
 
   // Ensure each document has a view mode entry when selected
   useEffect(() => {
@@ -886,7 +964,14 @@ const decreaseVolume = () => {
     console.log('[DOCS] pdfMapping value:', pdfMapping[manualId]);
     // Reset view mode for this manual explicitly so it does not carry over from previous manuals
     // Default all manuals to 'single' view on selection
-    setViewModes(prev => ({ ...prev, [manualId]: 'single' }));
+    setViewModes(prev => {
+      if (prev[manualId]) return prev;
+
+      return {
+        ...prev,
+        [manualId]: 'single'
+      };
+    });
     setActiveManualId(manualId);
     setSearchQuery('');
     setActiveSearchTerm('');
@@ -928,7 +1013,18 @@ const decreaseVolume = () => {
   useEffect(() => {
     const container = scrollContainerRef.current;
 
-  }, [activeManualId, isDraggingSlider, totalPagesInManual, currentViewMode, containerWidth, zoomLevel]);
+    if (!container) return;
+
+    requestAnimationFrame(() => {
+      container.scrollTop = 0;
+      container.scrollLeft = 0;
+
+      setPan({ x: 0, y: 0 });
+      panOriginRef.current = { x: 0, y: 0 };
+
+      setSliderValue(0);
+    });
+  }, [activeManualId]);
 
   // Handle standard viewport scroll tracking is now optional as only the active page spread is rendered
   const handleViewerScroll = () => {
@@ -936,39 +1032,77 @@ const decreaseVolume = () => {
   };
 
   // Immediate view mode transition handler
-  const handleViewModeChange = (mode: 'single' | 'double') => {
+  const handleViewModeChange = async (mode: 'single' | 'double') => {
     if (!activeManualId) return;
     // Prevent enabling double view on single-page PDFs
     const pagesForManual = pdfPagesMap[activeManualId];
     if (mode === 'double' && pagesForManual && pagesForManual.length === 1) return;
+    // Switch view mode without saving/restoring scroll anchors. Do not reposition viewport.
     setViewModes(prev => ({ ...prev, [activeManualId]: mode }));
-
-    setZoomLevel(100);
-
+    applyZoom(100);
   };
   // Page navigation controls (previous / next) using existing scroll container
   const handlePrevPage = () => {
     if (!scrollContainerRef.current || !currentManualPages || currentManualPages.length === 0) return;
-    const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
-    const targetIdx = Math.max(0, curIdx - 1);
+
+    const curIdx = Math.min(
+      Math.max(0, sliderValue),
+      currentManualPages.length - 1
+    );
+
+    const targetIdx =
+      currentViewMode === 'double'
+        ? Math.max(0, curIdx - 2)
+        : Math.max(0, curIdx - 1);
+
     const targetPage = currentManualPages[targetIdx];
     if (!targetPage) return;
-    const container = scrollContainerRef.current;
-    const el = container.querySelector(`[data-page-number="${targetPage.pageNumber}"]`) as HTMLElement | null;
+
+    const el = document.querySelector(
+      `[data-page-number="${targetPage.pageNumber}"]`
+    ) as HTMLElement | null;
+
     if (el) {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+
+      const containerCenterOffset = container.clientHeight / 2;
+      const frac = 0.5;
+
+      const targetScrollTop = Math.max(0, Math.round(el.offsetTop + (el.offsetHeight * frac) - containerCenterOffset));
+
+      container.scrollTop = targetScrollTop;
+
       setSliderValue(targetIdx);
     }
   };
 
   const handleNextPage = () => {
     if (!scrollContainerRef.current || !currentManualPages || currentManualPages.length === 0) return;
-    const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
-    const targetIdx = Math.min(currentManualPages.length - 1, curIdx + 1);
+
+    const curIdx = Math.min(
+      Math.max(0, sliderValue),
+      currentManualPages.length - 1
+    );
+
+    const targetIdx =
+      currentViewMode === 'double'
+        ? Math.min(currentManualPages.length - 1, curIdx + 2)
+        : Math.min(currentManualPages.length - 1, curIdx + 1);
+
     const targetPage = currentManualPages[targetIdx];
     if (!targetPage) return;
-    const container = scrollContainerRef.current;
-    const el = container.querySelector(`[data-page-number="${targetPage.pageNumber}"]`) as HTMLElement | null;
+
+    const el = document.querySelector(
+      `[data-page-number="${targetPage.pageNumber}"]`
+    ) as HTMLElement | null;
+
     if (el) {
+      el.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+
       setSliderValue(targetIdx);
     }
   };
@@ -1108,33 +1242,68 @@ const decreaseVolume = () => {
     );
   };
 
-  // Reset Zoom
+  // PHASE 1: Helper to get the page currently visible at viewport center
+  const getCurrentVisiblePage = (): number | null => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      console.log('FUNCTION: getCurrentVisiblePage - container ref is NULL');
+      return null;
+    }
+
+    const pages = Array.from(container.querySelectorAll('[data-page-number]')) as HTMLElement[];
+    if (!pages || pages.length === 0) {
+      console.log('FUNCTION: getCurrentVisiblePage - no pages found');
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const containerCenter = containerRect.top + (containerRect.height / 2);
+
+    let closestPage: number | null = null;
+    let minDist = Infinity;
+
+    pages.forEach(el => {
+      const elRect = el.getBoundingClientRect();
+      const elCenter = elRect.top + (elRect.height / 2);
+      const dist = Math.abs(elCenter - containerCenter);
+      if (dist < minDist) {
+        minDist = dist;
+        closestPage = Number(el.getAttribute('data-page-number'));
+      }
+    });
+
+    console.log('FUNCTION: getCurrentVisiblePage - found page:', closestPage, 'distance:', minDist);
+    return closestPage;
+  };
+  
+  // Removed anchor/restore and stable-height helpers to avoid automatic viewport repositioning.
+
   const handleResetZoom = () => {
-    setZoomLevel(100);
+    applyZoom(100);
   };
 
   const handleZoomOut = () => {
     const currentIdx = ZOOM_LEVELS.indexOf(zoomLevel);
+    let newZoom: number | undefined;
     if (currentIdx > 0) {
-      setZoomLevel(ZOOM_LEVELS[currentIdx - 1]);
+      newZoom = ZOOM_LEVELS[currentIdx - 1];
     } else {
-      const smaller = [...ZOOM_LEVELS].reverse().find(z => z < zoomLevel);
-      if (smaller !== undefined) {
-        setZoomLevel(smaller);
-      }
+      newZoom = [...ZOOM_LEVELS].reverse().find(z => z < zoomLevel);
     }
+    if (newZoom === undefined) newZoom = Math.max(25, zoomLevel - 10);
+    applyZoom(newZoom);
   };
 
   const handleZoomIn = () => {
     const currentIdx = ZOOM_LEVELS.indexOf(zoomLevel);
+    let newZoom: number | undefined;
     if (currentIdx !== -1 && currentIdx < ZOOM_LEVELS.length - 1) {
-      setZoomLevel(ZOOM_LEVELS[currentIdx + 1]);
+      newZoom = ZOOM_LEVELS[currentIdx + 1];
     } else {
-      const larger = ZOOM_LEVELS.find(z => z > zoomLevel);
-      if (larger !== undefined) {
-        setZoomLevel(larger);
-      }
+      newZoom = ZOOM_LEVELS.find(z => z > zoomLevel);
     }
+    if (newZoom === undefined) newZoom = Math.min(600, zoomLevel + 10);
+    applyZoom(newZoom);
   };
 
   // Direct page click jump indicator with direction logic
@@ -1175,10 +1344,10 @@ const decreaseVolume = () => {
     let contentW = 0;
     if (currentViewMode === 'single') {
       const baseWidth = isPdfManual ? safeContainerWidth : safeContainerWidth;
-      contentW = baseWidth * (zoomLevel / 100);
+      contentW = baseWidth * getZoomFactor(zoomLevel);
     } else {
       const baseSingle = isPdfManual ? (safeContainerWidth * VIEW_FIT.double) : safeContainerWidth;
-      contentW = (baseSingle * (zoomLevel / 100)) * 2 + PAGE_GAP_PX;
+      contentW = (baseSingle * getZoomFactor(zoomLevel)) * 2 + PAGE_GAP_PX;
     }
 
     const contentH = scrollContainerRef.current.scrollHeight;
@@ -1221,10 +1390,10 @@ const decreaseVolume = () => {
       {/* RIGHT SIDE - Corporate & IETM information (vertically and center aligned) */}
       <div className="flex-1 flex flex-col justify-center items-center p-12 pr-16 bg-white text-center space-y-4 select-text border-none">
         {/* Right column: logo at top, then website and text content centered below */}
-        <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(48px, 7vw, 95px)', whiteSpace: 'nowrap' ,transform: 'translateY(-170px)'}} />
+        <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(48px, 7vw, 95px)', whiteSpace: 'nowrap' ,transform: 'translateY(-70px)'}} />
 
         <div style={{ width: '100%', maxWidth: 720 }} className="flex flex-col items-center text-center space-y-3">
-          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(1px, 2.2vw, 30px)' ,transform: 'translateY(-190px)' }}>www.elcominnovations.com</a>
+          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(1px, 2.2vw, 30px)' ,transform: 'translateY(-90px)' }}>www.elcominnovations.com</a>
 
           <h2 className="font-black" style={{ fontSize: 'clamp(20px, 2.6vw, 30px)', whiteSpace: 'nowrap', margin: 0 }}>Interactive Electronic Technical Manual (IETM)</h2>
 
@@ -1238,9 +1407,35 @@ const decreaseVolume = () => {
       </div>
 
       {/* BOTTOM RIGHT CORNER - "Click Here To Proceed" button */}
-      <div className="absolute bottom-12 right-12 md:bottom-16 md:right-16 bg-white border-none">
+        <div className="absolute bottom-12 right-12 md:bottom-16 md:right-16 bg-white border-none">
         <button
-          onClick={() => setShowMainApp(true)}
+          onClick={() => {
+            // Show main app first so viewer DOM mounts, then ensure
+            // the active manual is initialized the same way as a manual selection.
+            setShowMainApp(true);
+
+            // Run initialization after the viewer mounts.
+            setTimeout(() => {
+              const container = scrollContainerRef.current;
+              try {
+                // TEMPORARY TEST
+              } catch (e) {}
+
+              setPan({ x: 0, y: 0 });
+              panOriginRef.current = { x: 0, y: 0 };
+              setSliderValue(0);
+
+              // Ensure first page is marked loaded and parsed like a manual open
+              if (activeManualId) {
+                setLoadedPagesMap(prev => ({ ...(prev || {}), [activeManualId]: { ...((prev && prev[activeManualId]) || {}), [1]: true } }));
+                if ((window as any).requestIdleCallback) {
+                  (window as any).requestIdleCallback(() => parsePage(activeManualId, 1));
+                } else {
+                  setTimeout(() => parsePage(activeManualId, 1), 50);
+                }
+              }
+            }, 50);
+          }}
           className="win-btn-blue font-sans"
         >
           Click Here To Proceed
@@ -1372,6 +1567,39 @@ const decreaseVolume = () => {
       }
     }
 
+    // Compute current page(s) for the document info panel
+    let currentPagesLabel = '';
+    let currentPagesValue = '';
+    if (currentManualPages && currentManualPages.length > 0) {
+      const curIdx = Math.min(Math.max(0, sliderValue), currentManualPages.length - 1);
+      if (currentViewMode === 'single' || isSinglePdf) {
+        const p = currentManualPages[curIdx].pageNumber;
+        currentPagesLabel = 'Current Page:';
+        currentPagesValue = `${p}`;
+      } else {
+        const firstNum = currentManualPages[curIdx].pageNumber;
+        let secondNum: number | undefined = undefined;
+        if (curIdx < currentManualPages.length - 1) {
+          secondNum = currentManualPages[curIdx + 1].pageNumber;
+        } else if (curIdx > 0) {
+          secondNum = currentManualPages[curIdx - 1].pageNumber;
+        } else {
+          secondNum = firstNum;
+        }
+        const start = Math.min(firstNum, secondNum);
+        const end = Math.max(firstNum, secondNum);
+        if (start === end) {
+          currentPagesLabel = 'Current Page:';
+          currentPagesValue = `${start}`;
+        } else {
+          currentPagesLabel = 'Current Pages:';
+          currentPagesValue = `${start}-${end}`;
+        }
+      }
+    }
+    // Slider fill percentage for zoom track (25 -> 600)
+    const zoomTrackPct = ((zoomLevel - 25) / (600 - 25)) * 100;
+
     return (
       <div id="main_ietm_interface" className="h-screen w-screen flex flex-col bg-neutral-100 font-sans overflow-hidden">
         
@@ -1454,36 +1682,58 @@ const decreaseVolume = () => {
               className="text-xs font-mono text-[#001570] font-semibold"
               style={{
                 fontSize: 'clamp(10px, 1.5vw, 12px)',
-                transform: 'translateY(-22px)'
+                transform: 'translateY(-2px)'
               }}
             >
               RFT1001 IETM v1.10
             </div>
 
             <div
-              className="flex items-center gap-2"
+              className="flex flex-col items-center gap-2"
               style={{ transform: 'translateY(-10px)' }}
             >
-              <button
-                onClick={decreaseVolume}
-                title="Decrease Speech Volume"
-                className="w-9 h-9 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
-              >
-                −
-              </button>
+              {/* Signal Bars */}
+              <div className="flex items-end gap-[2px] h-8">
+                {Array.from({ length: 10 }).map((_, index) => {
+                  const activeBars = Math.round(speechVolume * 10);
 
-              <button
-                onClick={increaseVolume}
-                title="Increase Speech Volume"
-                className="w-9 h-9 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
-              >
-                +
-              </button>
+                  return (
+                    <div
+                      key={index}
+                      className={`w-2 rounded-sm transition-all duration-300 ${
+                        index < activeBars
+                          ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
+                          : 'bg-neutral-300'
+                      }`}
+                      style={{
+                        height: `${8 + index * 2}px`
+                      }}
+                    />
+                  );
+                })}
+              </div>
 
-              {/* Volume Level Indicator */}
+              {/* Controls */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={decreaseVolume}
+                  title="Decrease Speech Volume"
+                  className="w-7 h-7 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
+                >
+                  −
+                </button>
 
-              <div className="px-3 py-1 rounded-full bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700 w-[110px] text-center">
-                Volume: {String(Math.round(speechVolume * 100)).padStart(3, ' ')}%
+                <div className="px-4 py-1 rounded-sm bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700 min-w-[120px] text-center">
+                  Volume {Math.round(speechVolume * 100)}%
+                </div>
+
+                <button
+                  onClick={increaseVolume}
+                  title="Increase Speech Volume"
+                  className="w-7 h-7 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
+                >
+                  +
+                </button>
               </div>
             </div>
           </div>
@@ -1532,14 +1782,22 @@ const decreaseVolume = () => {
               </div>
               <div className="flex justify-between text-xs pt-1">
                 <span className="text-neutral-500 font-bold">Total Pages:</span>
-                <span className="text-neutral-800 font-semibold">{totalPagesInManual}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-neutral-800 font-semibold">{totalPagesInManual}</span>
+                  {currentPagesValue !== '' && (
+                    <>
+                      <span className="text-neutral-500 font-bold">{currentPagesLabel}</span>
+                      <span className="text-neutral-800 font-semibold">{currentPagesValue}</span>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
 
           <button
             onClick={() => setShowMainApp(false)}
-            className="absolute top-2 left-2 z-50 w-7 h-7 flex items-center justify-center border border-gray-400 bg-white hover:bg-gray-100 rounded-sm text-sm font-bold transition-colors shadow-sm"
+            className="absolute top-2 left-2 z-50 w-8 h-8 flex items-center justify-center bg-transparent hover:bg-black/10 rounded-sm text-xl font-bold transition-colors"
             title="Return to Cover Page"
           >
             ←
@@ -1575,37 +1833,41 @@ const decreaseVolume = () => {
                   </button>
                 </div>
 
-                {/* Zoom controls + Reset */}
+                {/* Zoom controls: minus button, percentage input, slider, plus button */}
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Zoom</span>
-                  <button 
-                    onClick={handleZoomOut}
-                    disabled={zoomLevel <= 25}
-                    className="flex items-center justify-center text-sm border border-neutral-200 bg-white hover:bg-slate-50 text-neutral-800 disabled:opacity-45 disabled:hover:bg-white h-8 w-8 rounded shadow-sm cursor-pointer disabled:cursor-not-allowed transition-colors duration-150"
-                    title="Zoom Out"
-                  >
-                    -
-                  </button>
-                  <div className="bg-neutral-50 border border-neutral-200 h-8 w-12 flex items-center justify-center font-bold text-neutral-800 text-sm rounded">
-                    {zoomLevel}%
-                  </div>
-                  <button 
-                    onClick={handleZoomIn}
-                    disabled={zoomLevel >= 600}
-                    className="flex items-center justify-center text-sm border border-neutral-200 bg-white hover:bg-slate-50 text-neutral-800 disabled:opacity-45 disabled:hover:bg-white h-8 w-8 rounded shadow-sm cursor-pointer disabled:cursor-not-allowed transition-colors duration-150"
-                    title="Zoom In"
-                  >
-                    +
-                  </button>
+                  <input
+                    type="text"
+                    value={zoomInput}
+                    onChange={(e) => setZoomInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const raw = zoomInput.replace('%', '').trim();
+                        const newZoom = parseInt(raw, 10);
+                        if (!isNaN(newZoom)) {
+                          applyZoom(Math.max(25, Math.min(600, newZoom)));
+                        }
+                        (e.currentTarget as HTMLInputElement).blur();
+                      }
+                    }}
+                    onBlur={() => setZoomInput(String(zoomLevel))}
+                    className="bg-neutral-50 border border-neutral-200 h-8 w-14 text-center font-bold text-neutral-800 text-sm rounded"
+                    title="Type a zoom value and press Enter"
+                  />
 
-                  <button 
-                    id="reset_zoom_btn"
-                    onClick={handleResetZoom}
-                    className="flex items-center gap-1.5 text-sm font-semibold border border-neutral-200 bg-white hover:bg-neutral-50 h-8 px-3 rounded shadow-sm cursor-pointer transition-colors duration-150"
-                    title="Reset Zoom to 100%"
-                  >
-                    <RotateCcw size={13} />
-                  </button>
+                  <input
+                    type="range"
+                    min={25}
+                    max={600}
+                    step={1}
+                    value={zoomLevel}
+                    onInput={(e) => applyZoom(Number((e.target as HTMLInputElement).value))}
+                    className="h-2 w-40 appearance-none rounded-full"
+                    style={{
+                      background: `linear-gradient(to right, #0ea5e9 0%, #0ea5e9 ${zoomTrackPct}%, #e5e7eb ${zoomTrackPct}%)`
+                    }}
+                    aria-label="Zoom slider"
+                  />
                 </div>
               </div>
 
@@ -1694,13 +1956,10 @@ const decreaseVolume = () => {
               {/* Actual Dual-Page Render Arena */}
                 <div
                   ref={scrollContainerRef}
-                  className="flex-1 overflow-y-auto overflow-x-hidden"
-                  onMouseDown={handleMouseDown}
-                  onMouseMove={handleMouseMove}
-                  onMouseUp={handleMouseUp}
-                  onMouseLeave={handleMouseUp}
+                  className="flex-1 overflow-y-auto overflow-x-scroll"
+                  style={{ overflowAnchor: 'none' }}
                 >
-                
+
                 {/* Search error alert dialog */}
                 {searchError && (
                   <div className="mx-auto my-4 max-w-md bg-white border border-neutral-200 rounded-lg shadow-lg text-sm text-left overflow-hidden z-20">
@@ -1728,15 +1987,17 @@ const decreaseVolume = () => {
                 )}
 
                 {/* PDF pages rendered in continuous vertical flow (scroll-based) */}
-                <div ref={pdfContainerRef} className="m-auto w-full py-2">
-                  <div className="w-full relative overflow-hidden">
+                <div ref={pdfContainerRef} className="w-full py-2">
+                  <div className="relative">
                     <div
                       ref={panLayerRef}
                       style={{
-                        transform: `translate(${pan.x}px, ${pan.y}px)`,
-                        transformOrigin: "top left",
-                        width: "max-content",
-                        display: "inline-block"
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "flex-start",
+                        width: "fit-content",
+                        minWidth: "100%",
+
                       }}
 >
                   {
@@ -1745,12 +2006,12 @@ const decreaseVolume = () => {
                       const baseWidthForPdf = isPdfManual
                         ? ((currentViewMode as any) === 'single' ? safeContainerWidth : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
                         : safeContainerWidth;
-                      const visualWidthForGrid = baseWidthForPdf * (zoomLevel / 100);
+                      const visualWidthForGrid = baseWidthForPdf * getZoomFactor(adjustedZoom);
                       const PAGE_GAP_PX = 20; // keep gap-20 equivalent (5rem ~= 80px)
 
                       if (currentViewMode === 'single') {
                         return (
-                          <div className="flex flex-col items-center gap-6 w-full">
+                          <div className="flex flex-col items-center gap-6">
                             {(!currentManualPages || !Array.isArray(currentManualPages)) ? (
                               <div className="w-full py-20 text-center text-neutral-500">Loading document...</div>
                             ) : currentManualPages.map((page, idx) => {
@@ -1760,11 +2021,11 @@ const decreaseVolume = () => {
                                     : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
                                 : safeContainerWidth;
 
-                              const visualWidth = baseWidth * (debouncedZoom / 100);
+                              const visualWidth = baseWidth * getZoomFactor(adjustedZoom);
                               
                               return (
-                                <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
-                                  <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}>
+                                <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
+                                  <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * getZoomFactor(adjustedZoom))}px` }}>
                                       {isPdfManual ? (
                                         loadingManuals[activeManualId] ? (
                                           <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
@@ -1782,7 +2043,7 @@ const decreaseVolume = () => {
                                                   <PdfPageRenderer
                                                     pdfDoc={pdfDocsMap[activeManualId]}
                                                     pageNumber={page.pageNumber}
-                                                    zoomLevel={debouncedZoom}
+                                                    zoomLevel={adjustedZoom}
                                                     activeSearchTerm={activeSearchTerm}
                                                     activeMatchIndexOnPage={
                                                       selectedResult && selectedResult.pageNumber === page.pageNumber
@@ -1797,7 +2058,7 @@ const decreaseVolume = () => {
                                                 <div
                                                   className="page-placeholder w-full h-full flex items-center justify-center bg-neutral-50"
                                                   data-page-number={page.pageNumber}
-                                                  style={{ minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}
+                                                  style={{ minHeight: `${Math.max(400, 540 * getZoomFactor(adjustedZoom))}px` }}
                                                 >
                                                   <div className="text-neutral-400 text-xs">Page {page.pageNumber}</div>
                                                 </div>
@@ -1902,7 +2163,6 @@ const decreaseVolume = () => {
                       // Double-page grid mode: explicit column sizes to preserve gap on resize
                       return (
                         <div
-                          className="w-full"
                           style={{
                             display: 'grid',
                             gridTemplateColumns: `repeat(2, ${Math.max(1, visualWidthForGrid)}px)`,
@@ -1920,11 +2180,11 @@ const decreaseVolume = () => {
                                   : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
                               : safeContainerWidth;
 
-                            const visualWidth = baseWidth * (debouncedZoom / 100);
-                            
+                            const visualWidth = baseWidth * getZoomFactor(adjustedZoom);
+
                             return (
-                              <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text w-full flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
-                                <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}>
+                              <div key={page.id} data-page-number={page.pageNumber} data-page-id={page.id} className={isPdfManual ? 'relative select-text flex justify-center' : 'bg-white border border-neutral-200 text-black p-8 relative flex flex-col justify-between rounded-md shadow-md mx-auto'}>
+                                <div style={{ width: `${visualWidth}px`, minHeight: `${Math.max(400, 540 * getZoomFactor(adjustedZoom))}px` }}>
                                   {isPdfManual ? (
                                     loadingManuals[activeManualId] ? (
                                       <div className="flex-grow flex flex-col items-center justify-center text-xs font-mono text-neutral-500 py-20 min-h-[200px]">
@@ -1938,7 +2198,7 @@ const decreaseVolume = () => {
                                             <PdfPageRenderer
                                               pdfDoc={pdfDocsMap[activeManualId]}
                                               pageNumber={page.pageNumber}
-                                              zoomLevel={debouncedZoom}
+                                              zoomLevel={adjustedZoom}
                                               activeSearchTerm={activeSearchTerm}
                                               activeMatchIndexOnPage={
                                                 selectedResult && selectedResult.pageNumber === page.pageNumber
@@ -1952,7 +2212,7 @@ const decreaseVolume = () => {
                                             <div
                                               className="page-placeholder w-full h-full flex items-center justify-center bg-neutral-50"
                                               data-page-number={page.pageNumber}
-                                              style={{ minHeight: `${Math.max(400, 540 * (debouncedZoom / 100))}px` }}
+                                              style={{ minHeight: `${Math.max(400, 540 * getZoomFactor(adjustedZoom))}px` }}
                                             >
                                               <div className="text-neutral-400 text-xs">Page {page.pageNumber}</div>
                                             </div>

@@ -333,25 +333,3 @@ input[type=range].custom-slider::-moz-range-track {
   line-height: 1.25;
   color: #1f2937;
 }
-.zoom-slider {
-  appearance: none;
-  height: 6px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    #3b82f6 0%,
-    #3b82f6 var(--progress),
-    #d1d5db var(--progress),
-    #d1d5db 100%
-  );
-}
-
-.zoom-slider::-webkit-slider-thumb {
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  background: white;
-  border: 2px solid #3b82f6;
-  cursor: pointer;
-}

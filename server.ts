@@ -23,6 +23,11 @@ async function startServer() {
   // Set body limits to support large base64 image transfers from the UI for OCR
   app.use(express.json({ limit: "50mb" }));
 
+  app.post("/api/debug_log", (req, res) => {
+    console.log(`[FRONTEND DEBUG] ${req.body.message}`);
+    res.sendStatus(200);
+  });
+
   // API endpoint for server-side OCR processing
   app.post("/api/ocr", async (req, res) => {
     try {

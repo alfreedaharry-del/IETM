@@ -302,6 +302,8 @@ export default function App() {
   const lowerStatusRef = useRef<HTMLDivElement | null>(null);
   const [speechVolume, setSpeechVolume] = useState(1.0);
   const [showVolumePopup, setShowVolumePopup] = useState(false);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>('');
   const [totalPages, setTotalPages] = useState(0);
 
   // container-based measurement for PDF layout (replaces window-based PDF_BASE_WIDTH)
@@ -359,14 +361,16 @@ export default function App() {
       u.rate = 1.0;
       u.pitch = 1.0;
 
-      const voices = window.speechSynthesis.getVoices();
+      const availableVoices = window.speechSynthesis.getVoices();
+      const selectedVoice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
 
-      const preferred =
-        voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) ||
-        voices[0];
-
-      if (preferred) {
-        u.voice = preferred;
+      if (selectedVoice) {
+        u.voice = selectedVoice;
+      } else {
+        const preferred =
+          availableVoices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) ||
+          availableVoices[0];
+        if (preferred) u.voice = preferred;
       }
 
       window.speechSynthesis.speak(u);
@@ -395,12 +399,102 @@ export default function App() {
     setSpeechVolume(prev => Math.max(0, prev - 0.1));
   };
 
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const beepTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const initialVolumeRef = useRef(true);
+
   // Auto-close volume popup after 3 seconds of inactivity; resets on volume change
   useEffect(() => {
     if (!showVolumePopup) return;
     const timer = setTimeout(() => setShowVolumePopup(false), 3000);
     return () => clearTimeout(timer);
   }, [showVolumePopup, speechVolume]);
+
+  useEffect(() => {
+    if (initialVolumeRef.current) {
+      initialVolumeRef.current = false;
+      return;
+    }
+
+    // Do not interrupt narration if TTS is playing
+    if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.speaking) {
+      return;
+    }
+
+    if (beepTimeoutRef.current) clearTimeout(beepTimeoutRef.current);
+    beepTimeoutRef.current = setTimeout(() => {
+      try {
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        const ctx = audioContextRef.current;
+        if (ctx.state === 'suspended') ctx.resume();
+
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(800, ctx.currentTime);
+
+        const safeVol = Math.max(0, Math.min(1, speechVolume));
+        gainNode.gain.setValueAtTime(safeVol * 0.1, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.15);
+      } catch (e) {
+        console.error("Audio beep error:", e);
+      }
+    }, 100);
+  }, [speechVolume]);
+
+  useEffect(() => {
+    const updateVoices = () => {
+      const availableVoices = window.speechSynthesis.getVoices();
+      setVoices(availableVoices);
+
+      const savedURI = localStorage.getItem('selectedVoiceURI');
+      if (savedURI && availableVoices.find(v => v.voiceURI === savedURI)) {
+        setSelectedVoiceURI(savedURI);
+      } else {
+        const defaultVoice = availableVoices.find(v => v.default) || availableVoices[0];
+        if (defaultVoice) {
+          setSelectedVoiceURI(defaultVoice.voiceURI);
+        }
+      }
+    };
+
+    updateVoices();
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+    return () => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
+    };
+  }, []);
+
+  const handleVoiceChange = (uri: string) => {
+    setSelectedVoiceURI(uri);
+    localStorage.setItem('selectedVoiceURI', uri);
+  };
+
+  const testVoice = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance("Testing selected voice.");
+    u.volume = speechVolume;
+    const availableVoices = window.speechSynthesis.getVoices();
+    const selectedVoice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
+    if (selectedVoice) {
+      u.voice = selectedVoice;
+    }
+    window.speechSynthesis.speak(u);
+  };
 
   // Navigation Section Expand/Collapse State - empty map so all sections remain collapsed by default
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -1638,7 +1732,7 @@ export default function App() {
               className="nav-item-hover flex items-center gap-2.5 py-1.5 pl-3 pr-2.5 rounded hover:bg-neutral-50 cursor-pointer text-neutral-800 font-semibold transition-colors border-l-2 border-transparent"
             >
               {getNodeIcon(node.id)}
-              <span className="truncate font-sans" style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }}>{node.title}</span>
+              <span className="truncate font-sans" style={{ fontSize: 'clamp(7px, 0.8vw, 14px)' }}>{node.title}</span>
             </div>
 
             {/* Expandable Children leaves */}
@@ -1653,7 +1747,7 @@ export default function App() {
                       onMouseEnter={(e) => handleHoverEnter(e as React.MouseEvent, subDoc.docId, subDoc.title)}
                       onMouseLeave={() => clearHover()}
                       className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-9 rounded cursor-pointer transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 border-l-2 border-transparent'}`}
-                      style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }}
+                      style={{ fontSize: 'clamp(7px, 0.8vw, 14px)' }}
                     >
                       {getNodeIcon(subDoc.id)}
                       <span className="truncate font-sans" title={subDoc.title}>{subDoc.title}</span>
@@ -1676,7 +1770,7 @@ export default function App() {
               className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-3 rounded cursor-pointer font-semibold transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-700 hover:bg-neutral-50 border-l-2 border-transparent'}`}
             >
               {node.docId ? getNodeIcon(node.docId) : getNodeIcon(node.id)}
-              <span className="truncate font-sans" style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }} title={node.title}>{node.title}</span>
+              <span className="truncate font-sans" style={{ fontSize: 'clamp(7px, 0.8vw, 14px)' }} title={node.title}>{node.title}</span>
             </div>
           </div>
         );
@@ -1752,8 +1846,8 @@ export default function App() {
           ref={headerRef}
           className="relative overflow-hidden text-[#000000] flex items-center justify-between font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50"
           style={{
-            padding: 'clamp(2px, 0.4vw, 8px) clamp(8px, 1.5vw, 24px)',
-            fontSize: 'clamp(11px, 1.1vw, 14px)',
+            padding: 'clamp(1px, 0.25vw, 8px) clamp(6px, 1.2vw, 24px)',
+            fontSize: 'clamp(9px, 0.95vw, 14px)',
             backgroundImage: `url('${headerBg}')`,
             backgroundSize: 'cover',
             backgroundPosition: 'center'
@@ -1781,10 +1875,10 @@ export default function App() {
               alt="ELCOM Logo"
               className="w-auto object-contain"
               style={{
-                height: 'clamp(22px, 2.5vw, 38px)',
+                height: 'clamp(26px, 3vw, 42px)',
                 minHeight: 'clamp(18px, 2vw, 28px)',
                 minWidth: 'clamp(18px, 2vw, 28px)',
-                margin: 'clamp(6px, 1.5vw, 25px)'
+                margin: 'clamp(4px, 1vw, 20px)'
               }}
             />
           </div>
@@ -1797,7 +1891,7 @@ export default function App() {
             <h1
               className="font-black uppercase leading-tight text-center"
               style={{
-                fontSize: 'clamp(16px, 1.8vw, 28px)',
+                fontSize: 'clamp(13px, 1.5vw, 28px)',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis'
@@ -1809,10 +1903,10 @@ export default function App() {
             <div
               className="tracking-widest text-center uppercase"
               style={{
-                fontSize: 'clamp(8px, 1vw, 14px)',
+                fontSize: 'clamp(8px, 0.9vw, 14px)',
                 color: '#c10000',
                 textShadow: '0px 0px 8px rgba(255,255,255,2)',
-                margin: 'clamp(2px, 0.5vw, 7px)',
+                margin: 'clamp(1px, 0.2vw, 7px)',
                 marginTop: 'clamp(1px, 0.3vw, 4px)'
               }}
             >
@@ -1823,39 +1917,67 @@ export default function App() {
           {/* Version + Volume Controls */}
           <div
             className="relative z-10 flex flex-col items-end"
-            style={{ minWidth: 'clamp(80px, 12vw, 180px)', flexShrink: 0, gap: 'clamp(2px, 0.3vw, 8px)' }}
+            style={{ minWidth: 'clamp(80px, 12vw, 300px)', flexShrink: 0, gap: 'clamp(2px, 0.3vw, 8px)' }}
           >
             <div
               className="text-xs font-mono text-[#001570] font-semibold"
               style={{
-                fontSize: 'clamp(7px, 0.8vw, 12px)',
-                transform: `translateY(clamp(-18px, -1vw, -4px))`
+                fontSize: 'clamp(6px, 0.7vw, 12px)',
+                transform: `translateY(clamp(2px, 2vw, -4px))`
               }}
             >
               RFT1001 IETM v1.10
             </div>
 
-            {/* Clickable volume bar indicator */}
-            <button
-              onClick={() => setShowVolumePopup(true)}
-              className="flex items-end cursor-pointer"
-              title="Adjust Volume"
-              style={{ gap: 'clamp(1px, 0.15vw, 2px)', height: 'clamp(20px, 1.7vw, 32px)', transform: `translateY(clamp(4px, 1.5vw, 20px))` }}
-            >
-              {Array.from({ length: 10 }).map((_, index) => {
-                const activeBars = Math.round(speechVolume * 10);
-                return (
-                  <div
-                    key={index}
-                    className={`w-2 rounded-sm transition-all duration-300 ${index < activeBars
-                      ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
-                      : 'bg-blue-400/50'
-                      }`}
-                    style={{ height: `${8 + index * 2}px` }}
-                  />
-                );
-              })}
-            </button>
+            <div className="flex flex-col items-end gap-2" style={{ transform: `translateY(clamp(4px, 1.5vw, 20px))` }}>
+              {/* Clickable volume bar indicator */}
+              <button
+                onClick={() => setShowVolumePopup(true)}
+                className="flex items-end cursor-pointer pb-1"
+                title="Adjust Volume"
+                style={{ gap: 'clamp(1px, 0.15vw, 2px)', height: 'clamp(16px, 1.4vw, 32px)' }}
+              >
+                {Array.from({ length: 10 }).map((_, index) => {
+                  const activeBars = Math.round(speechVolume * 10);
+                  return (
+                    <div
+                      key={index}
+                      className={`w-1.5 rounded-sm transition-all duration-300 ${index < activeBars
+                        ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
+                        : 'bg-blue-400/50'
+                        }`}
+                      style={{ height: `${5 + index * 2}px` }}
+                    />
+                  );
+                })}
+              </button>
+
+              {/* Voice Selection */}
+              <div className="flex items-start gap-2">
+                <div className="flex flex-col items-center">
+                  <select
+                    className="text-xs bg-white/80 border border-neutral-300 rounded px-1 py-0.5 outline-none focus:border-blue-500 w-28 truncate shadow-sm backdrop-blur-sm"
+                    value={selectedVoiceURI}
+                    onChange={(e) => handleVoiceChange(e.target.value)}
+                    title="Select Voice"
+                  >
+                    {voices.map(v => (
+                      <option key={v.voiceURI} value={v.voiceURI}>
+                        {v.name} ({v.lang}){v.default ? ' [Default]' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-black font-semibold uppercase tracking-wider mt-0.5" style={{ fontSize: 'clamp(7px, 0.7vw, 10px)' }}>Change Voice</span>
+                </div>
+                <button
+                  onClick={testVoice}
+                  className="text-xs bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-0.5 rounded border border-blue-200 transition-colors shadow-sm"
+                  title="Test Voice"
+                >
+                  Test
+                </button>
+              </div>
+            </div>
 
             {/* Volume popup modal */}
             {showVolumePopup && (
@@ -1948,7 +2070,7 @@ export default function App() {
                   {manualsInfo[activeManualId]?.title}
                 </span>
               </div>
-              <div className="flex justify-between text-xs pt-1">
+              <div className="flex items-center gap-2 text-xs pt-1 w-fit">
                 <span className="text-neutral-500 font-bold">Total Pages:</span>
                 <div className="flex items-center gap-3">
                   <span className="text-neutral-800 font-semibold">{totalPagesInManual}</span>
@@ -1979,15 +2101,20 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
 
             {/* VIEWING TOOLBAR - Top: left (view/zoom), center (page navigation), right (search) */}
-            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg flex flex-nowrap items-center relative shrink-0 shadow-sm font-sans" style={{ padding: 'clamp(3px, 0.4vw, 8px)', gap: 'clamp(3px, 0.4vw, 8px)', marginBottom: 'clamp(4px, 0.5vw, 12px)', alignContent: 'flex-start' }}>
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg flex flex-nowrap items-center relative shrink-0 shadow-sm font-sans" style={{ padding: 'clamp(1px, 0.25vw, 8px)', gap: 'clamp(1px, 0.25vw, 8px)', marginBottom: 'clamp(2px, 0.3vw, 12px)', alignContent: 'flex-start' }}>
               {/* LEFT: View mode + Zoom controls */}
               <div className="viewer-toolbar-group flex items-center gap-2 sm:gap-3 lg:gap-4 flex-shrink-0 relative z-10">
                 {/* View Mode Selection Control */}
-                <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm select-none font-sans bg-white items-center" style={{ height: 'clamp(24px, 2.5vw, 32px)' }}>
+                <div
+                  className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm select-none font-sans bg-white items-center"
+                  style={{
+                    height: 'clamp(20px, 2vw, 32px)'
+                  }}
+                >
                   <button
                     onClick={() => handleViewModeChange('single')}
                     className={`font-semibold h-full transition-colors ${currentViewMode === 'single' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-r border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
-                    style={{ padding: '0 clamp(6px, 0.7vw, 12px)', fontSize: 'clamp(10px, 1vw, 14px)' }}
+                    style={{ padding: '0 clamp(4px, 0.4vw, 12px)', fontSize: 'clamp(7px, 0.8vw, 14px)' }}
                     title="Single Page View"
                   >
                     Single
@@ -1997,7 +2124,7 @@ export default function App() {
                     onClick={() => handleViewModeChange('double')}
                     disabled={isPdfManual && pdfPagesMap[activeManualId] && pdfPagesMap[activeManualId].length === 1}
                     className={`font-semibold h-full transition-colors ${currentViewMode === 'double' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-l border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'} disabled:opacity-50 disabled:cursor-not-allowed`}
-                    style={{ padding: '0 clamp(6px, 0.7vw, 12px)', fontSize: 'clamp(10px, 1vw, 14px)' }}
+                    style={{ padding: '0 clamp(4px, 0.4vw, 12px)', fontSize: 'clamp(7px, 0.8vw, 14px)' }}
                     title="Double Page View"
                   >
                     Double
@@ -2005,17 +2132,17 @@ export default function App() {
                 </div>
 
                 {/* Zoom controls: new independent zoom system */}
-                <div className="flex items-center border border-[#e2e8f0] rounded bg-white" style={{ height: 'clamp(24px, 2.5vw, 32px)', marginLeft: 'clamp(4px, 0.5vw, 8px)' }}>
+                <div className="flex items-center border border-[#e2e8f0] rounded bg-white" style={{ height: 'clamp(20px, 2vw, 32px)', marginLeft: 'clamp(4px, 0.5vw, 8px)' }}>
                   <button
                     onClick={() => changeZoomByStep(-10)}
                     title="Zoom Out"
                     className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-r border-[#e6eef7]"
-                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                    style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                   >
                     <Minus size={14} />
                   </button>
 
-                  <div className="flex items-center justify-center" style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(52px, 5.5vw, 84px)', padding: '0 clamp(2px, 0.2vw, 4px)' }}>
+                  <div className="flex items-center justify-center" style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(42px, 4.5vw, 84px)', padding: '0 clamp(2px, 0.2vw, 4px)' }}>
                     <input
                       value={zoomInput}
                       onChange={(e) => setZoomInput(e.target.value)}
@@ -2023,7 +2150,7 @@ export default function App() {
                       onBlur={handleZoomInputBlur}
                       aria-label="Zoom percentage"
                       className="text-center font-semibold w-full bg-transparent outline-none"
-                      style={{ fontSize: 'clamp(10px, 1vw, 14px)', height: 'clamp(18px, 2vw, 24px)' }}
+                      style={{ fontSize: 'clamp(7px, 0.8vw, 14px)', height: 'clamp(18px, 2vw, 24px)' }}
                     />
                   </div>
 
@@ -2031,7 +2158,7 @@ export default function App() {
                     onClick={() => changeZoomByStep(10)}
                     title="Zoom In"
                     className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
-                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                    style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                   >
                     <Plus size={14} />
                   </button>
@@ -2039,7 +2166,7 @@ export default function App() {
                     onClick={resetZoom}
                     title="Reset Zoom"
                     className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
-                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                    style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                   >
                     <RefreshCw size={14} />
                   </button>
@@ -2052,13 +2179,13 @@ export default function App() {
                   type="button"
                   onClick={handlePrevPage}
                   className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
-                  style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                  style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                   title="Previous Page"
                 >
                   <ArrowLeft size={14} />
                 </button>
 
-                <div className="bg-neutral-50 border border-neutral-200 flex items-center justify-center font-sans font-medium text-neutral-700 rounded select-none text-center whitespace-nowrap" style={{ padding: '0 clamp(6px, 0.7vw, 12px)', height: 'clamp(24px, 2.5vw, 32px)', minWidth: 'clamp(50px, 6vw, 80px)', fontSize: 'clamp(10px, 1vw, 14px)' }}>
+                <div className="bg-neutral-50 border border-neutral-200 flex items-center justify-center font-sans font-medium text-neutral-700 rounded select-none text-center whitespace-nowrap" style={{ padding: '0 clamp(6px, 0.7vw, 12px)', height: 'clamp(20px, 2vw, 32px)', minWidth: 'clamp(50px, 6vw, 80px)', fontSize: 'clamp(7px, 0.8vw, 14px)' }}>
                   {pageLabel}
                 </div>
 
@@ -2066,7 +2193,7 @@ export default function App() {
                   type="button"
                   onClick={handleNextPage}
                   className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
-                  style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                  style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                   title="Next Page"
                 >
                   <ArrowRight size={14} />
@@ -2076,7 +2203,7 @@ export default function App() {
               {/* RIGHT: Search function input field */}
               <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 min-w-0 relative z-10">
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1 w-full min-w-0">
-                  <div className="relative min-w-0 w-[clamp(40px,20vw,325px)]">
+                  <div className="relative min-w-0 w-[clamp(35px,18vw,325px)]">
                     {/* Search icon or spinner */}
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
                       {isSearching
@@ -2090,7 +2217,7 @@ export default function App() {
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search"
                       className="border border-neutral-200 rounded text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors min-w-0 w-full"
-                      style={{ height: 'clamp(24px, 2.5vw, 32px)', paddingLeft: 'clamp(24px, 2.5vw, 32px)', paddingRight: 'clamp(20px, 2.2vw, 28px)', fontSize: 'clamp(10px, 1vw, 14px)', minWidth: '20px' }}
+                      style={{ height: 'clamp(20px, 2vw, 32px)', paddingLeft: 'clamp(24px, 2.5vw, 32px)', paddingRight: 'clamp(20px, 2.2vw, 28px)', fontSize: 'clamp(7px, 0.8vw, 14px)', minWidth: '20px' }}
                     />
                     {/* X clear button — only visible when there is text */}
                     {searchQuery.length > 0 && (
@@ -2110,7 +2237,7 @@ export default function App() {
                     type="submit"
                     disabled={isSearching}
                     className="flex items-center flex-shrink-0 font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] disabled:opacity-60 disabled:cursor-not-allowed text-[#000000] rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
-                    style={{ height: 'clamp(24px, 2.5vw, 32px)', padding: '0 clamp(4px, 0.5vw, 8px)', fontSize: 'clamp(10px, 1vw, 14px)', gap: 'clamp(2px, 0.2vw, 4px)' }}
+                    style={{ height: 'clamp(20px, 2vw, 32px)', padding: '0 clamp(4px, 0.5vw, 8px)', fontSize: 'clamp(7px, 0.8vw, 14px)', gap: 'clamp(2px, 0.2vw, 4px)' }}
                     title="Find phrase"
                   >
                     <span>{isSearching ? 'Searching…' : 'Search'}</span>
@@ -2120,14 +2247,14 @@ export default function App() {
                 {/* Search result operators */}
                 {searchResults.length > 0 && (
                   <div className="flex items-center gap-1 font-sans">
-                    <span className="text-sky-950 font-bold bg-sky-100/85 rounded border border-sky-200" style={{ fontSize: 'clamp(10px, 1vw, 14px)', marginLeft: 'clamp(2px, 0.3vw, 6px)', padding: 'clamp(2px, 0.3vw, 4px) clamp(4px, 0.6vw, 10px)' }}>
+                    <span className="text-sky-950 font-bold bg-sky-100/85 rounded border border-sky-200" style={{ fontSize: 'clamp(7px, 0.8vw, 14px)', marginLeft: 'clamp(2px, 0.3vw, 6px)', padding: 'clamp(2px, 0.3vw, 4px) clamp(4px, 0.6vw, 10px)' }}>
                       {currentSearchIndex + 1} of {searchResults.length}
                     </span>
                     <button
                       type="button"
                       onClick={() => handleJumpToSearchResult((currentSearchIndex - 1 + searchResults.length) % searchResults.length)}
                       className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
-                      style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                      style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                       title="Prev Match"
                     >
                       ▲
@@ -2136,7 +2263,7 @@ export default function App() {
                       type="button"
                       onClick={() => handleJumpToSearchResult((currentSearchIndex + 1) % searchResults.length)}
                       className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
-                      style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
+                      style={{ height: 'clamp(20px, 2vw, 32px)', width: 'clamp(20px, 2vw, 32px)' }}
                       title="Next Match"
                     >
                       ▼
@@ -2159,7 +2286,7 @@ export default function App() {
 
                 {/* Search error alert dialog */}
                 {searchError && (
-                  <div className="mx-auto my-4 bg-white border border-neutral-200 rounded-lg shadow-lg text-left overflow-hidden z-20" style={{ maxWidth: 'clamp(300px, 40vw, 450px)', fontSize: 'clamp(10px, 1vw, 14px)' }}>
+                  <div className="mx-auto my-4 bg-white border border-neutral-200 rounded-lg shadow-lg text-left overflow-hidden z-20" style={{ maxWidth: 'clamp(300px, 40vw, 450px)', fontSize: 'clamp(7px, 0.8vw, 14px)' }}>
                     <div className="bg-neutral-50 border-b border-neutral-200 font-semibold text-neutral-800 flex justify-between items-center" style={{ padding: 'clamp(4px, 0.5vw, 8px) clamp(8px, 1vw, 16px)' }}>
                       <span>Search Query Outcome</span>
                       <button onClick={() => setSearchError('')} className="text-neutral-400 hover:text-neutral-600 font-bold">

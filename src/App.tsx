@@ -57,6 +57,10 @@ interface PdfPageRendererProps {
   activeMatchIndexOnPage?: number;
   width: number;
   padding: number;
+  onHighlightFound?: (
+    pageNumber: number,
+    rect: { x: number; y: number; w: number; h: number }
+  ) => void;
 }
 
 const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
@@ -65,7 +69,8 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
   activeSearchTerm,
   activeMatchIndexOnPage = -1,
   width,
-  padding
+  padding,
+  onHighlightFound
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [renderError, setRenderError] = useState<string>('');
@@ -85,7 +90,6 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-
 
         const originalViewport = page.getViewport({ scale: 1 });
         // Fixed 100% view: target width equals available width minus padding
@@ -126,25 +130,60 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
           const items: any[] = textContent.items;
           const matchedHighlights: { x: number; y: number; w: number; h: number }[] = [];
 
-          const pdfPageWidth = page.view[2];
-          const pdfPageHeight = page.view[3];
-
-          const scaleX = cssViewport.width / pdfPageWidth;
-          const scaleY = cssViewport.height / pdfPageHeight;
-
           items.forEach(item => {
-            if (item.str.toLowerCase().includes(query)) {
-              const x = item.transform[4];
-              const y = item.transform[5];
-              const w = item.width || (item.str.length * item.transform[0] * 0.5);
-              const h = item.height || item.transform[0];
+            // Skip items with no renderable string
+            if (!item.str || item.str.trim() === '') return;
 
-              matchedHighlights.push({
-                x: x * scaleX,
-                y: (pdfPageHeight - y - h) * scaleY,
-                w: w * scaleX,
-                h: h * scaleY
-              });
+            const itemStrLower = item.str.toLowerCase();
+            let searchFrom = 0;
+
+            while (true) {
+              const matchIdx = itemStrLower.indexOf(query, searchFrom);
+              if (matchIdx === -1) break;
+
+              // --- Pixel-perfect coordinate mapping via PDF.js viewport transform ---
+              // item.transform = [scaleX, skewY, skewX, scaleY, translateX, translateY]
+              // translateX/Y are in PDF user-space units (origin bottom-left).
+              // cssViewport.convertToViewportPoint maps them to CSS pixels (origin top-left).
+              const [tx, ty] = cssViewport.convertToViewportPoint(
+                item.transform[4],
+                item.transform[5]
+              );
+
+              // Rendered glyph height in CSS pixels: use the absolute scale of the transform
+              const pdfFontSize = Math.abs(item.transform[3] || item.transform[0] || 12);
+              const glyphH = pdfFontSize * scale;
+
+              // Item's total rendered width in PDF user-space units
+              const itemRenderedWidth = item.width ?? 0;
+              const itemTotalChars = item.str.length;
+
+              // Per-character width in CSS pixels
+              const charWidthPx = itemTotalChars > 0
+                ? (itemRenderedWidth * scale) / itemTotalChars
+                : 0;
+
+              // Horizontal offset to the start of the match (in CSS pixels)
+              const matchOffsetPx = matchIdx * charWidthPx;
+              const matchWidthPx = Math.max(query.length * charWidthPx, 4);
+
+              // tx,ty from convertToViewportPoint give the baseline origin (bottom-left of glyph).
+              // The highlight box top is at (ty - glyphH) in CSS top-left coordinates.
+              const rect = {
+                x: tx + matchOffsetPx,
+                y: ty - glyphH,
+                w: matchWidthPx,
+                h: glyphH
+              };
+
+              matchedHighlights.push(rect);
+
+              // Only notify the caller about the active match so scrolling targets the right spot
+              if (matchedHighlights.length - 1 === activeMatchIndexOnPage && onHighlightFound) {
+                onHighlightFound(pageNumber, rect);
+              }
+
+              searchFrom = matchIdx + query.length;
             }
           });
 
@@ -170,7 +209,7 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
         renderTaskRef.current.cancel();
       }
     };
-  }, [pdfDoc, pageNumber, activeSearchTerm, width, padding]);
+  }, [pdfDoc, pageNumber, activeSearchTerm, activeMatchIndexOnPage, width, padding]);
 
   return (
     <div className="relative w-full h-full flex justify-center items-center overflow-hidden">
@@ -187,10 +226,11 @@ const PdfPageRenderer: React.FC<PdfPageRendererProps> = ({
               <div
                 key={index}
                 className={`absolute rounded-sm pointer-events-none ${isCurrentlySelected
-                    ? 'bg-red-500/50 border-2 border-red-700 shadow-[0_0_8px_rgba(239,68,68,0.8)] z-10 scale-105'
-                    : 'bg-yellow-400/35 border border-amber-600/50'
+                  ? 'bg-orange-400/100'
+                  : 'bg-yellow-500/50'
                   }`}
                 style={{
+                  mixBlendMode: 'multiply',
                   left: `${hl.x}px`,
                   top: `${hl.y}px`,
                   width: `${hl.w}px`,
@@ -261,6 +301,7 @@ export default function App() {
   const bottomTrackRef = useRef<HTMLDivElement | null>(null);
   const lowerStatusRef = useRef<HTMLDivElement | null>(null);
   const [speechVolume, setSpeechVolume] = useState(1.0);
+  const [showVolumePopup, setShowVolumePopup] = useState(false);
   const [totalPages, setTotalPages] = useState(0);
 
   // container-based measurement for PDF layout (replaces window-based PDF_BASE_WIDTH)
@@ -269,8 +310,8 @@ export default function App() {
   const [containerWidth, setContainerWidth] = useState(0);
   const safeContainerWidth = containerWidth || 800;
   const VIEW_FIT = {
-    single: 0.80,
-    double: 0.50,
+    single: 0.95,
+    double: 0.47,
   };
 
 
@@ -354,12 +395,25 @@ export default function App() {
     setSpeechVolume(prev => Math.max(0, prev - 0.1));
   };
 
+  // Auto-close volume popup after 3 seconds of inactivity; resets on volume change
+  useEffect(() => {
+    if (!showVolumePopup) return;
+    const timer = setTimeout(() => setShowVolumePopup(false), 3000);
+    return () => clearTimeout(timer);
+  }, [showVolumePopup, speechVolume]);
+
   // Navigation Section Expand/Collapse State - empty map so all sections remain collapsed by default
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
 
   // Slide dragging state
   const [isDraggingSlider, setIsDraggingSlider] = useState<boolean>(false);
   const [sliderValue, setSliderValue] = useState<number>(0);
+
+  // Synchronous scroll restoration anchors for zoom and view mode changes
+  const targetZoomCenterRef = useRef<{ baseX: number, baseY: number } | null>(null);
+  const targetPageForViewModeRef = useRef<number | null>(null);
+
+
 
   // Global window mouseup/touchend to safely release dragging mode
   useEffect(() => {
@@ -433,9 +487,12 @@ export default function App() {
   // Search State
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeSearchTerm, setActiveSearchTerm] = useState<string>('');
-  const [searchResults, setSearchResults] = useState<{ pageNumber: number; textSnippet: string; fieldName: string }[]>([]);
+  // Each result carries the page number and which occurrence-index on that page it corresponds to,
+  // so PdfPageRenderer can highlight/center exactly the right match.
+  const [searchResults, setSearchResults] = useState<{ pageNumber: number; textSnippet: string; fieldName: string; matchIndexOnPage: number }[]>([]);
   const [currentSearchIndex, setCurrentSearchIndex] = useState<number>(-1);
   const [searchError, setSearchError] = useState<string>('');
+  const [isSearching, setIsSearching] = useState<boolean>(false);
 
   // Status indicators for Windows 95 feel
   const [systemTime, setSystemTime] = useState<string>('');
@@ -452,7 +509,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: msg })
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   // Zoom removed: no anchor or transition locks required
@@ -461,6 +518,13 @@ export default function App() {
 
   // Ref to the scroll container to manage clicking and tracking page positions
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const activeHighlightRef = useRef<{
+    pageNumber: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } | null>(null);
   const isSelfScrolling = useRef<boolean>(false);
 
   // Filter page database to only have pages of current active manual
@@ -484,8 +548,45 @@ export default function App() {
   const MIN_ZOOM = 0.1; // 10%
   const MAX_ZOOM = 4.0; // 400%
 
+  // Eliminate zoom jitter: synchronously restore scroll position immediately after DOM mutations, before paint
+  useLayoutEffect(() => {
+    if (targetZoomCenterRef.current) {
+      const container = scrollContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const { baseX, baseY } = targetZoomCenterRef.current;
+
+        const newViewCenterX = baseX * zoom;
+        const newViewCenterY = baseY * zoom;
+
+        container.scrollLeft = Math.max(0, Math.round(newViewCenterX - rect.width / 2));
+        container.scrollTop = Math.max(0, Math.round(newViewCenterY - rect.height / 2));
+      }
+      targetZoomCenterRef.current = null;
+    }
+  }, [zoom]);
+
+  // Eliminate view mode jitter: synchronously scroll the target page back into view before paint
+  useLayoutEffect(() => {
+    if (targetPageForViewModeRef.current !== null) {
+      const container = scrollContainerRef.current;
+      if (container) {
+        const target = container.querySelector(`[data-page-number="${targetPageForViewModeRef.current}"]`) as HTMLElement | null;
+        if (target) {
+          target.scrollIntoView({ behavior: 'auto', block: 'center' });
+        }
+      }
+      targetPageForViewModeRef.current = null;
+    }
+  }, [viewModes, activeManualId]);
+
   // Apply a new zoom scale while preserving the viewport anchor (the visible point)
   const applyZoom = (newScale: number) => {
+    if (newScale === zoom) return;
+
+    // Clamp
+    newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newScale));
+
     const container = scrollContainerRef.current;
     if (!container) {
       setZoom(newScale);
@@ -493,41 +594,19 @@ export default function App() {
       return;
     }
 
-    // Clamp
-    newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newScale));
-
-    // Capture current viewport center in scaled content coordinates
+    // Capture current viewport center in base (unscaled) content coordinates
     const rect = container.getBoundingClientRect();
     const viewCenterX = container.scrollLeft + rect.width / 2;
     const viewCenterY = container.scrollTop + rect.height / 2;
 
-    const prevScale = zoom;
+    targetZoomCenterRef.current = {
+      baseX: viewCenterX / zoom,
+      baseY: viewCenterY / zoom
+    };
 
-    // Convert to base (unscaled) content coordinates, then compute new scaled coords
-    const baseX = viewCenterX / prevScale;
-    const baseY = viewCenterY / prevScale;
-
-    const newViewCenterX = baseX * newScale;
-    const newViewCenterY = baseY * newScale;
-
-    const newScrollLeft = Math.max(0, Math.round(newViewCenterX - rect.width / 2));
-    const newScrollTop = Math.max(0, Math.round(newViewCenterY - rect.height / 2));
-
-    // Set zoom first so layout uses the new sizes
+    // Trigger layout update
     setZoom(newScale);
     setZoomInput(`${Math.round(newScale * 100)}%`);
-
-    // After layout updates, adjust scroll to keep the same visible content anchored
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        try {
-          container.scrollLeft = newScrollLeft;
-          container.scrollTop = newScrollTop;
-        } catch (e) {
-          // ignore
-        }
-      });
-    });
   };
 
   const changeZoomByStep = (deltaPercent: number) => {
@@ -538,8 +617,7 @@ export default function App() {
 
   // Reset zoom to 100% without modifying scroll position or view mode
   const resetZoom = () => {
-    setZoom(1);
-    setZoomInput('100%');
+    applyZoom(1);
   };
 
   const handleZoomInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -996,11 +1074,7 @@ export default function App() {
       };
     });
     setActiveManualId(manualId);
-    setSearchQuery('');
-    setActiveSearchTerm('');
-    setSearchResults([]);
-    setCurrentSearchIndex(-1);
-    setSearchError('');
+    clearSearch();
     setIsPanning(false);
     // Reset vertical scroll and pan transform (no horizontal scrolling used anymore)
 
@@ -1035,18 +1109,15 @@ export default function App() {
   // Reset scroll when manual changes and keep slider synced to scroll position
   useEffect(() => {
     const container = scrollContainerRef.current;
-
     if (!container) return;
 
-    requestAnimationFrame(() => {
-      container.scrollTop = 0;
-      container.scrollLeft = 0;
+    container.scrollTop = 0;
+    container.scrollLeft = 0;
 
-      setPan({ x: 0, y: 0 });
-      panOriginRef.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
+    panOriginRef.current = { x: 0, y: 0 };
 
-      setSliderValue(0);
-    });
+    setSliderValue(0);
   }, [activeManualId]);
 
   // Handle standard viewport scroll tracking is now optional as only the active page spread is rendered
@@ -1056,7 +1127,7 @@ export default function App() {
 
   // Immediate view mode transition handler
   const handleViewModeChange = async (mode: 'single' | 'double') => {
-    if (!activeManualId) return;
+    if (!activeManualId || viewModes[activeManualId] === mode) return;
 
     // Prevent enabling double view on single-page PDFs
     const pagesForManual = pdfPagesMap[activeManualId];
@@ -1065,32 +1136,16 @@ export default function App() {
     // Capture current visible page identity (page number)
     const currentPageNum = getCurrentVisiblePage();
 
+    if (currentPageNum !== null) {
+      targetPageForViewModeRef.current = currentPageNum;
+
+      // Update sliderValue optimistically
+      const foundIdx = currentManualPages.findIndex(p => p.pageNumber === currentPageNum);
+      if (foundIdx !== -1) setSliderValue(foundIdx);
+    }
+
     // Apply view mode change
     setViewModes(prev => ({ ...prev, [activeManualId]: mode }));
-
-    // After layout re-renders, scroll the same page back into view by page identity
-    requestAnimationFrame(() => {
-      // second rAF to wait for DOM changes from React
-      requestAnimationFrame(() => {
-        try {
-          if (!currentPageNum) return;
-          const container = scrollContainerRef.current;
-          if (!container) return;
-
-          const target = container.querySelector(`[data-page-number="${currentPageNum}"]`) as HTMLElement | null;
-          if (target) {
-            // center the page in viewport to preserve page identity
-            target.scrollIntoView({ behavior: 'auto', block: 'center' });
-
-            // update sliderValue to the index of the preserved page
-            const foundIdx = currentManualPages.findIndex(p => p.pageNumber === currentPageNum);
-            if (foundIdx !== -1) setSliderValue(foundIdx);
-          }
-        } catch (e) {
-          // ignore
-        }
-      });
-    });
   };
   // Page navigation controls (previous / next) using existing scroll container
   const handlePrevPage = () => {
@@ -1157,59 +1212,114 @@ export default function App() {
       setSliderValue(targetIdx);
     }
   };
-  // Search Logic in active manual
-  const handleSearchExecute = (e?: React.FormEvent) => {
+  // Clear all search state and highlights
+  const clearSearch = () => {
+    setSearchQuery('');
+    setActiveSearchTerm('');
+    setSearchResults([]);
+    setCurrentSearchIndex(-1);
+    setSearchError('');
+    setIsSearching(false);
+  };
+
+  // Search Logic — reads text directly from the PDF for complete, reliable results
+  const handleSearchExecute = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSearchError('');
 
     if (!searchQuery.trim()) {
-      setActiveSearchTerm('');
-      setSearchResults([]);
-      setCurrentSearchIndex(-1);
+      clearSearch();
       return;
     }
 
     const query = searchQuery.toLowerCase().trim();
-    const results: { pageNumber: number; textSnippet: string; fieldName: string }[] = [];
+
+    // For PDF manuals: search directly against the PDF's own text content
+    if (isPdfManual && pdfDocsMap[activeManualId]) {
+      setIsSearching(true);
+      setActiveSearchTerm(searchQuery.trim());
+      setSearchResults([]);
+      setCurrentSearchIndex(-1);
+
+      const pdf = pdfDocsMap[activeManualId];
+      const numPages = pdf.numPages;
+      const results: { pageNumber: number; textSnippet: string; fieldName: string; matchIndexOnPage: number }[] = [];
+
+      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+        try {
+          const page = await pdf.getPage(pageNum);
+          const textContent = await page.getTextContent();
+          const items: any[] = textContent.items;
+
+          // Track how many matches we have found on this page so far
+          let matchCountOnPage = 0;
+
+          items.forEach(item => {
+            if (!item.str) return;
+            const str = item.str.toLowerCase();
+            let from = 0;
+            while (true) {
+              const idx = str.indexOf(query, from);
+              if (idx === -1) break;
+              results.push({
+                pageNumber: pageNum,
+                textSnippet: query,
+                fieldName: 'PDF Text',
+                matchIndexOnPage: matchCountOnPage
+              });
+              matchCountOnPage++;
+              from = idx + query.length;
+            }
+          });
+        } catch (err) {
+          console.error('Search error on page', pageNum, err);
+        }
+      }
+
+      setIsSearching(false);
+
+      if (results.length > 0) {
+        setSearchResults(results);
+        setCurrentSearchIndex(0);
+        // Rough-scroll the first match's page into view; onHighlightFound will fine-tune
+        const targetPage = results[0].pageNumber;
+        const foundIdx = currentManualPages.findIndex(p => p.pageNumber === targetPage);
+        if (foundIdx !== -1) {
+          const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`) as HTMLElement | null;
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setSliderValue(foundIdx);
+        }
+      } else {
+        setActiveSearchTerm('');
+        setSearchError(`"${searchQuery}" not found in current document.`);
+      }
+      return;
+    }
+
+    // Fallback: non-PDF (text-only) manual search using pre-parsed page data
+    const results: { pageNumber: number; textSnippet: string; fieldName: string; matchIndexOnPage: number }[] = [];
 
     currentManualPages.forEach(page => {
-      // Check Section Title
-      if (page.sectionTitle.toLowerCase().includes(query)) {
+      let countOnPage = 0;
+
+      const addResult = (fieldName: string) => {
         results.push({
           pageNumber: page.pageNumber,
-          textSnippet: page.sectionTitle,
-          fieldName: 'Header Title'
+          textSnippet: searchQuery.trim(),
+          fieldName,
+          matchIndexOnPage: countOnPage++
         });
-      }
-      // Check Sub Title
-      if (page.subTitle && page.subTitle.toLowerCase().includes(query)) {
-        results.push({
-          pageNumber: page.pageNumber,
-          textSnippet: page.subTitle,
-          fieldName: 'Section Subtitle'
-        });
-      }
-      // Check Paragraphs
+      };
+
+      if (page.sectionTitle.toLowerCase().includes(query)) addResult('Header Title');
+      if (page.subTitle && page.subTitle.toLowerCase().includes(query)) addResult('Section Subtitle');
       page.paragraphs.forEach(pText => {
-        if (pText.toLowerCase().includes(query)) {
-          results.push({
-            pageNumber: page.pageNumber,
-            textSnippet: pText,
-            fieldName: 'Technical Body'
-          });
-        }
+        if (pText.toLowerCase().includes(query)) addResult('Technical Body');
       });
-      // Check Table Cells
       if (page.table) {
         page.table.rows.forEach(row => {
           row.forEach(cell => {
-            if (cell.toLowerCase().includes(query)) {
-              results.push({
-                pageNumber: page.pageNumber,
-                textSnippet: `Table Element: ${cell}`,
-                fieldName: 'Specification Grid'
-              });
-            }
+            if (cell.toLowerCase().includes(query)) addResult('Specification Grid');
           });
         });
       }
@@ -1219,10 +1329,7 @@ export default function App() {
       setActiveSearchTerm(searchQuery.trim());
       setSearchResults(results);
       setCurrentSearchIndex(0);
-
-      // Navigate instantly to page pair containing first result
       const targetPage = results[0].pageNumber;
-      // Map global page number back to manual index (0-based list)
       const foundIdx = currentManualPages.findIndex(p => p.pageNumber === targetPage);
       if (foundIdx !== -1) {
         const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`);
@@ -1239,7 +1346,10 @@ export default function App() {
     }
   };
 
-  // Jump to specific search result index
+  // Jump to specific search result index.
+  // Step 1: rough-scroll to bring the target page into view.
+  // Step 2: onHighlightFound (fired by PdfPageRenderer after re-render with new activeMatchIndexOnPage)
+  //         performs the precise centering of the exact match rect.
   const handleJumpToSearchResult = (index: number) => {
     if (searchResults.length === 0 || index < 0 || index >= searchResults.length) return;
 
@@ -1247,10 +1357,10 @@ export default function App() {
     const targetPage = searchResults[index].pageNumber;
     const foundIdx = currentManualPages.findIndex(p => p.pageNumber === targetPage);
     if (foundIdx !== -1) {
-      // Scroll the found page into view in the vertical container
-      const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`);
-      if (target && scrollContainerRef.current) {
-        (target as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Rough scroll: bring the page into view so PdfPageRenderer is mounted/visible
+      const target = pdfContainerRef.current?.querySelector(`[data-page-number="${currentManualPages[foundIdx].pageNumber}"]`) as HTMLElement | null;
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
       }
       // update sliderValue optimistically
       setSliderValue(foundIdx);
@@ -1278,8 +1388,8 @@ export default function App() {
               <span
                 key={index}
                 className={`px-1 font-bold rounded-sm border transition-all duration-150 ${isActiveMatch
-                    ? 'bg-red-500 text-white border-red-700 shadow-[0_0_6px_rgba(239,68,68,0.6)] animate-pulse'
-                    : 'bg-yellow-300 border border-amber-600/35 text-black'
+                  ? 'bg-red-500 text-white border-red-700 shadow-[0_0_6px_rgba(239,68,68,0.6)] animate-pulse'
+                  : 'bg-yellow-300 border border-amber-600/35 text-black'
                   }`}
               >
                 {part}
@@ -1413,8 +1523,20 @@ export default function App() {
         <img src={logoWebp} alt="ELCOM Logo" className="w-auto object-contain" style={{ height: 'clamp(48px, 7vw, 95px)', whiteSpace: 'nowrap', transform: 'translateY(-70px)' }} />
 
         <div style={{ width: '100%', maxWidth: 720 }} className="flex flex-col items-center text-center space-y-3">
-          <a href="http://www.elcominnovations.com" target="_blank" rel="noopener noreferrer" className="font-medium" style={{ whiteSpace: 'nowrap', fontSize: 'clamp(1px, 2.2vw, 30px)', transform: 'translateY(-90px)' }}>www.elcominnovations.com</a>
-
+          <a
+            href="http://www.elcominnovations.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium no-underline"
+            style={{
+              whiteSpace: 'nowrap',
+              fontSize: 'clamp(1px, 2.2vw, 30px)',
+              transform: 'translateY(-90px)',
+              textDecoration: 'none'
+            }}
+          >
+            www.elcominnovations.com
+          </a>
           <h2 className="font-black" style={{ fontSize: 'clamp(20px, 2.6vw, 30px)', whiteSpace: 'nowrap', margin: 0 }}>Interactive Electronic Technical Manual (IETM)</h2>
 
           <div style={{ fontStyle: 'italic', fontSize: 'clamp(12px, 1.4vw, 14px)', whiteSpace: 'nowrap', marginTop: '16px', marginBottom: '16px' }}>for</div>
@@ -1468,37 +1590,38 @@ export default function App() {
   const MainViewerScreen = () => {
     const getNodeIcon = (id: string) => {
       const lowerId = id.toLowerCase();
+      const style = { width: 'clamp(10px, 1.2vw, 18px)', height: 'clamp(10px, 1.2vw, 18px)' };
       if (lowerId.includes('user-handbook')) {
-        return <BookOpen size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <BookOpen style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('tech-manual-1') || lowerId === 'tech-1-1' || lowerId === 'tech-1-2') {
-        return <Notebook size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Notebook style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('t1v1') || lowerId.includes('description') || lowerId === 'tech-1-1') {
-        return <Info size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Info style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('t1v2') || lowerId.includes('drawings') || lowerId === 'tech-1-2') {
-        return <Compass size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Compass style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('tech-manual-2') || lowerId.includes('maintenance') || lowerId === 'tech-2') {
-        return <Wrench size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Wrench style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('tech-manual-3') || lowerId.includes('overhauling') || lowerId === 'tech-3') {
-        return <Hammer size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Hammer style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('tech-manual-4')) {
-        return <Package size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Package style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('t4v1') || lowerId.includes('part-list') || lowerId.includes('parts') || lowerId === 'tech-4-1') {
-        return <ClipboardList size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <ClipboardList style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('t4v2') || lowerId.includes('illustrations') || lowerId === 'tech-4-2') {
-        return <Image size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Image style={style} className="text-[#0ea5e9] shrink-0" />;
       }
       if (lowerId.includes('product-tree') || lowerId === 'product-tree') {
-        return <Network size={14} className="text-[#0ea5e9] shrink-0" />;
+        return <Network style={style} className="text-[#0ea5e9] shrink-0" />;
       }
-      return <FileText size={14} className="text-[#0ea5e9] shrink-0" />;
+      return <FileText style={style} className="text-[#0ea5e9] shrink-0" />;
     };
 
     // Left Tree document items rendered recursively or explicitly
@@ -1515,7 +1638,7 @@ export default function App() {
               className="nav-item-hover flex items-center gap-2.5 py-1.5 pl-3 pr-2.5 rounded hover:bg-neutral-50 cursor-pointer text-neutral-800 font-semibold transition-colors border-l-2 border-transparent"
             >
               {getNodeIcon(node.id)}
-              <span className="truncate font-sans text-[13px]">{node.title}</span>
+              <span className="truncate font-sans" style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }}>{node.title}</span>
             </div>
 
             {/* Expandable Children leaves */}
@@ -1529,7 +1652,8 @@ export default function App() {
                       onClick={() => handleSelectManual(subDoc.docId)}
                       onMouseEnter={(e) => handleHoverEnter(e as React.MouseEvent, subDoc.docId, subDoc.title)}
                       onMouseLeave={() => clearHover()}
-                      className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-9 rounded cursor-pointer text-[13px] transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 border-l-2 border-transparent'}`}
+                      className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-9 rounded cursor-pointer transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 border-l-2 border-transparent'}`}
+                      style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }}
                     >
                       {getNodeIcon(subDoc.id)}
                       <span className="truncate font-sans" title={subDoc.title}>{subDoc.title}</span>
@@ -1552,7 +1676,7 @@ export default function App() {
               className={`nav-item-hover flex items-center gap-2.5 py-1.5 pr-2.5 pl-3 rounded cursor-pointer font-semibold transition-colors duration-150 ${isActive ? 'bg-sky-100 text-neutral-900 font-semibold border-l-2 border-[#0ea5e9]' : 'text-neutral-700 hover:bg-neutral-50 border-l-2 border-transparent'}`}
             >
               {node.docId ? getNodeIcon(node.docId) : getNodeIcon(node.id)}
-              <span className="truncate font-sans text-[13px]" title={node.title}>{node.title}</span>
+              <span className="truncate font-sans" style={{ fontSize: 'clamp(9px, 0.9vw, 14px)' }} title={node.title}>{node.title}</span>
             </div>
           </div>
         );
@@ -1626,12 +1750,15 @@ export default function App() {
         <div
           id="retro_top_header"
           ref={headerRef}
-          className="relative overflow-hidden text-[#000000] px-4 py-2 flex items-center justify-between text-sm font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50"
+          className="relative overflow-hidden text-[#000000] flex items-center justify-between font-semibold shrink-0 select-none shadow-md border-b border-sky-400/50"
           style={{
+            padding: 'clamp(2px, 0.4vw, 8px) clamp(8px, 1.5vw, 24px)',
+            fontSize: 'clamp(11px, 1.1vw, 14px)',
             backgroundImage: `url('${headerBg}')`,
             backgroundSize: 'cover',
             backgroundPosition: 'center'
           }}
+
         >
           {/* Subtle Technical/Engineering Blueprints Grid Mesh */}
           <div
@@ -1646,19 +1773,18 @@ export default function App() {
 
           {/* Logo */}
           <div
-            className="flex items-center gap-3 relative z-10"
-            style={{ minWidth: 72 }}
+            className="flex items-center relative z-10"
+            style={{ minWidth: 'clamp(40px, 5vw, 72px)', gap: 'clamp(4px, 0.5vw, 12px)' }}
           >
             <img
               src={logoWebp}
               alt="ELCOM Logo"
               className="w-auto object-contain"
               style={{
-                height: 'clamp(28px, 3.5vw, 50px)',
-                minHeight: 28,
-                minWidth: 28,
-                margin: '25px',
-                transform: 'translateY(0px)'
+                height: 'clamp(22px, 2.5vw, 38px)',
+                minHeight: 'clamp(18px, 2vw, 28px)',
+                minWidth: 'clamp(18px, 2vw, 28px)',
+                margin: 'clamp(6px, 1.5vw, 25px)'
               }}
             />
           </div>
@@ -1681,11 +1807,13 @@ export default function App() {
             </h1>
 
             <div
-              className="text-sm tracking-widest mt-1 text-center uppercase"
+              className="tracking-widest text-center uppercase"
               style={{
-                fontSize: 'clamp(10px, 1.5vw, 16px)',
-                color: '#e67339',
-                textShadow: '0px 0px 8px rgba(255,255,255,2)'
+                fontSize: 'clamp(8px, 1vw, 14px)',
+                color: '#c10000',
+                textShadow: '0px 0px 8px rgba(255,255,255,2)',
+                margin: 'clamp(2px, 0.5vw, 7px)',
+                marginTop: 'clamp(1px, 0.3vw, 4px)'
               }}
             >
               FEILD TELEPHONE SET WITH MAGNETO AND AUTO MODE (RFT1001)
@@ -1694,78 +1822,100 @@ export default function App() {
 
           {/* Version + Volume Controls */}
           <div
-            className="relative z-10 flex flex-col items-end gap-2"
-            style={{ minWidth: 180, flexShrink: 0 }}
+            className="relative z-10 flex flex-col items-end"
+            style={{ minWidth: 'clamp(80px, 12vw, 180px)', flexShrink: 0, gap: 'clamp(2px, 0.3vw, 8px)' }}
           >
             <div
               className="text-xs font-mono text-[#001570] font-semibold"
               style={{
-                fontSize: 'clamp(10px, 1.5vw, 12px)',
-                transform: 'translateY(-2px)'
+                fontSize: 'clamp(7px, 0.8vw, 12px)',
+                transform: `translateY(clamp(-18px, -1vw, -4px))`
               }}
             >
               RFT1001 IETM v1.10
             </div>
 
-            <div
-              className="flex flex-col items-center gap-2"
-              style={{ transform: 'translateY(-10px)' }}
+            {/* Clickable volume bar indicator */}
+            <button
+              onClick={() => setShowVolumePopup(true)}
+              className="flex items-end cursor-pointer"
+              title="Adjust Volume"
+              style={{ gap: 'clamp(1px, 0.15vw, 2px)', height: 'clamp(20px, 1.7vw, 32px)', transform: `translateY(clamp(4px, 1.5vw, 20px))` }}
             >
-              {/* Signal Bars */}
-              <div className="flex items-end gap-[2px] h-8">
-                {Array.from({ length: 10 }).map((_, index) => {
-                  const activeBars = Math.round(speechVolume * 10);
+              {Array.from({ length: 10 }).map((_, index) => {
+                const activeBars = Math.round(speechVolume * 10);
+                return (
+                  <div
+                    key={index}
+                    className={`w-2 rounded-sm transition-all duration-300 ${index < activeBars
+                      ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
+                      : 'bg-blue-400/50'
+                      }`}
+                    style={{ height: `${8 + index * 2}px` }}
+                  />
+                );
+              })}
+            </button>
 
-                  return (
-                    <div
-                      key={index}
-                      className={`w-2 rounded-sm transition-all duration-300 ${index < activeBars
-                          ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
-                          : 'bg-neutral-300'
-                        }`}
-                      style={{
-                        height: `${8 + index * 2}px`
-                      }}
-                    />
-                  );
-                })}
-              </div>
-
-              {/* Controls */}
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={decreaseVolume}
-                  title="Decrease Speech Volume"
-                  className="w-7 h-7 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
+            {/* Volume popup modal */}
+            {showVolumePopup && (
+              <div
+                className="fixed inset-0 z-[9999] flex items-center justify-center"
+                onClick={() => setShowVolumePopup(false)}
+              >
+                <div
+                  className="bg-white border border-neutral-300 shadow-2xl rounded-xl p-8 flex flex-col items-center gap-6"
+                  onClick={(e) => e.stopPropagation()}
                 >
-                  −
-                </button>
-
-                <div className="px-4 py-1 rounded-sm bg-white border border-neutral-300 shadow-md text-xs font-semibold text-neutral-700 min-w-[120px] text-center">
-                  Volume {Math.round(speechVolume * 100)}%
+                  <div className="flex items-center gap-8">
+                    <button
+                      onClick={decreaseVolume}
+                      className="w-16 h-40 rounded-lg border border-neutral-300 bg-neutral-100 hover:bg-neutral-200 transition-colors text-4xl font-bold"
+                    >
+                      −
+                    </button>
+                    <div className="flex flex-col items-center">
+                      <div className="flex items-end gap-2 h-40">
+                        {Array.from({ length: 10 }).map((_, index) => {
+                          const activeBars = Math.round(speechVolume * 10);
+                          return (
+                            <div
+                              key={index}
+                              className={`w-6 rounded transition-all duration-300 ${index < activeBars
+                                ? 'bg-gradient-to-t from-[#001570] to-[#0284c7]'
+                                : 'bg-neutral-300'
+                                }`}
+                              style={{ height: `${20 + index * 10}px` }}
+                            />
+                          );
+                        })}
+                      </div>
+                      <div className="mt-6 text-3xl font-bold text-neutral-800">
+                        {Math.round(speechVolume * 100)}%
+                      </div>
+                    </div>
+                    <button
+                      onClick={increaseVolume}
+                      className="w-16 h-40 rounded-lg border border-neutral-300 bg-neutral-100 hover:bg-neutral-200 transition-colors text-4xl font-bold"
+                    >
+                      +
+                    </button>
+                  </div>
                 </div>
-
-                <button
-                  onClick={increaseVolume}
-                  title="Increase Speech Volume"
-                  className="w-7 h-7 rounded-full bg-white border border-neutral-300 shadow-sm hover:bg-neutral-100 transition-all flex items-center justify-center text-lg font-bold"
-                >
-                  +
-                </button>
               </div>
-            </div>
+            )}
           </div>
         </div>
 
         {/* INNER MENUBAR removed per requirements */}
 
         {/* WORKSPACE ZONE (SPLIT: NAVIGATION & VIEWING CONTAINER) */}
-        <div className="flex-grow flex flex-row overflow-hidden min-h-0 bg-neutral-100 p-3 gap-3">
+        <div className="flex-grow flex flex-row overflow-hidden min-h-0 bg-neutral-100" style={{ padding: 'clamp(4px, 0.5vw, 12px)', gap: 'clamp(4px, 0.5vw, 12px)' }}>
 
           {/* LEFT COLUMN: NAVIGATION EXPLORER PANEL */}
-          <div id="left_nav_panel" ref={navPanelRef} className="relative w-[300px] shrink-0 flex flex-col h-full min-h-0 bg-white border border-neutral-200 rounded-lg p-3 shadow-sm" onMouseLeave={() => { clearHover(); }}>
-            <div className="text-[#0ea5e9] text-sm font-bold font-sans tracking-wide border-b border-neutral-100 pb-2 mb-3 uppercase flex items-center gap-2">
-              <span className="w-1.5 h-3 bg-[#0ea5e9] rounded-sm inline-block"></span>
+          <div id="left_nav_panel" ref={navPanelRef} className="relative shrink-0 flex flex-col h-full min-h-0 bg-white border border-neutral-200 rounded-lg shadow-sm" style={{ width: 'clamp(180px, 20vw, 300px)', padding: 'clamp(6px, 0.8vw, 12px)' }} onMouseLeave={() => { clearHover(); }}>
+            <div className="text-[#0ea5e9] font-bold font-sans tracking-wide border-b border-neutral-100 uppercase flex items-center" style={{ fontSize: 'clamp(10px, 1vw, 14px)', paddingBottom: 'clamp(4px, 0.5vw, 8px)', marginBottom: 'clamp(4px, 0.5vw, 12px)', gap: 'clamp(4px, 0.4vw, 8px)' }}>
+              <span className="bg-[#0ea5e9] rounded-sm inline-block" style={{ width: 'clamp(3px, 0.2vw, 6px)', height: 'clamp(8px, 1vw, 12px)' }}></span>
               <span>Document Explorer</span>
             </div>
 
@@ -1788,7 +1938,7 @@ export default function App() {
             )}
 
             {/* Quick terminal quick-stats overview (anchored to bottom) */}
-            <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-auto p-3 text-xs font-sans text-left text-neutral-600 space-y-1.5">
+            <div className="bg-neutral-50 border border-neutral-200 rounded-md mt-auto font-sans text-left text-neutral-600" style={{ padding: 'clamp(4px, 0.6vw, 12px)', fontSize: 'clamp(9px, 0.8vw, 12px)' }}>
               <div
                 className="text-xs font-normal truncate"
                 title={`Active Document: ${manualsInfo[activeManualId]?.title}`}
@@ -1815,7 +1965,8 @@ export default function App() {
 
           <button
             onClick={() => setShowMainApp(false)}
-            className="absolute top-2 left-2 z-50 w-8 h-8 flex items-center justify-center bg-transparent hover:bg-black/10 rounded-sm text-xl font-bold transition-colors"
+            className="absolute z-50 flex items-center justify-center bg-transparent hover:bg-black/10 rounded-sm font-bold transition-colors"
+            style={{ top: 'clamp(4px, 0.5vw, 8px)', left: 'clamp(4px, 0.5vw, 8px)', width: 'clamp(24px, 2.5vw, 32px)', height: 'clamp(24px, 2.5vw, 32px)', fontSize: 'clamp(14px, 1.5vw, 20px)' }}
             title="Return to Cover Page"
           >
             ←
@@ -1828,14 +1979,15 @@ export default function App() {
           <div className="flex-grow flex flex-col overflow-hidden min-h-0 bg-transparent">
 
             {/* VIEWING TOOLBAR - Top: left (view/zoom), center (page navigation), right (search) */}
-            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg p-2 gap-2 flex flex-nowrap items-center relative shrink-0 mb-3 shadow-sm font-sans" style={{ alignContent: 'flex-start' }}>
+            <div id="viewer_toolbar" ref={toolbarRef} className="bg-white border border-neutral-200 rounded-lg flex flex-nowrap items-center relative shrink-0 shadow-sm font-sans" style={{ padding: 'clamp(3px, 0.4vw, 8px)', gap: 'clamp(3px, 0.4vw, 8px)', marginBottom: 'clamp(4px, 0.5vw, 12px)', alignContent: 'flex-start' }}>
               {/* LEFT: View mode + Zoom controls */}
               <div className="viewer-toolbar-group flex items-center gap-2 sm:gap-3 lg:gap-4 flex-shrink-0 relative z-10">
                 {/* View Mode Selection Control */}
-                <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm h-8 select-none font-sans bg-white items-center">
+                <div className="flex border border-[#e2e8f0] rounded overflow-hidden shadow-sm select-none font-sans bg-white items-center" style={{ height: 'clamp(24px, 2.5vw, 32px)' }}>
                   <button
                     onClick={() => handleViewModeChange('single')}
-                    className={`px-3 text-sm font-semibold h-full transition-colors ${currentViewMode === 'single' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-r border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
+                    className={`font-semibold h-full transition-colors ${currentViewMode === 'single' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-r border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'}`}
+                    style={{ padding: '0 clamp(6px, 0.7vw, 12px)', fontSize: 'clamp(10px, 1vw, 14px)' }}
                     title="Single Page View"
                   >
                     Single
@@ -1844,7 +1996,8 @@ export default function App() {
                   <button
                     onClick={() => handleViewModeChange('double')}
                     disabled={isPdfManual && pdfPagesMap[activeManualId] && pdfPagesMap[activeManualId].length === 1}
-                    className={`px-3 text-sm font-semibold h-full transition-colors ${currentViewMode === 'double' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-l border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    className={`font-semibold h-full transition-colors ${currentViewMode === 'double' ? 'bg-[#7dd3fc] text-[#000000] font-bold border-l border-[#38bdf8]' : 'bg-white text-neutral-700 hover:bg-neutral-50'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    style={{ padding: '0 clamp(6px, 0.7vw, 12px)', fontSize: 'clamp(10px, 1vw, 14px)' }}
                     title="Double Page View"
                   >
                     Double
@@ -1852,37 +2005,41 @@ export default function App() {
                 </div>
 
                 {/* Zoom controls: new independent zoom system */}
-                <div className="flex items-center border border-[#e2e8f0] rounded h-8 ml-2 bg-white">
+                <div className="flex items-center border border-[#e2e8f0] rounded bg-white" style={{ height: 'clamp(24px, 2.5vw, 32px)', marginLeft: 'clamp(4px, 0.5vw, 8px)' }}>
                   <button
                     onClick={() => changeZoomByStep(-10)}
                     title="Zoom Out"
-                    className="h-8 w-8 flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-r border-[#e6eef7]"
+                    className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-r border-[#e6eef7]"
+                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                   >
                     <Minus size={14} />
                   </button>
 
-                  <div className="h-8 w-[84px] flex items-center justify-center px-1">
+                  <div className="flex items-center justify-center" style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(52px, 5.5vw, 84px)', padding: '0 clamp(2px, 0.2vw, 4px)' }}>
                     <input
                       value={zoomInput}
                       onChange={(e) => setZoomInput(e.target.value)}
                       onKeyDown={handleZoomInputKey}
                       onBlur={handleZoomInputBlur}
                       aria-label="Zoom percentage"
-                      className="text-center text-sm font-semibold w-full h-6 bg-transparent outline-none"
+                      className="text-center font-semibold w-full bg-transparent outline-none"
+                      style={{ fontSize: 'clamp(10px, 1vw, 14px)', height: 'clamp(18px, 2vw, 24px)' }}
                     />
                   </div>
 
                   <button
                     onClick={() => changeZoomByStep(10)}
                     title="Zoom In"
-                    className="h-8 w-8 flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
+                    className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
+                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                   >
                     <Plus size={14} />
                   </button>
                   <button
                     onClick={resetZoom}
                     title="Reset Zoom"
-                    className="h-8 w-8 flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
+                    className="flex items-center justify-center text-neutral-700 hover:bg-neutral-50 border-l border-[#e6eef7]"
+                    style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                   >
                     <RefreshCw size={14} />
                   </button>
@@ -1894,32 +2051,37 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handlePrevPage}
-                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
+                  style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                   title="Previous Page"
                 >
                   <ArrowLeft size={14} />
                 </button>
 
-                <div className="bg-neutral-50 border border-neutral-200 px-3 h-8 flex items-center justify-center font-sans font-medium text-neutral-700 text-sm rounded select-none text-center whitespace-nowrap" style={{ minWidth: '80px', whiteSpace: 'nowrap' }}>
+                <div className="bg-neutral-50 border border-neutral-200 flex items-center justify-center font-sans font-medium text-neutral-700 rounded select-none text-center whitespace-nowrap" style={{ padding: '0 clamp(6px, 0.7vw, 12px)', height: 'clamp(24px, 2.5vw, 32px)', minWidth: 'clamp(50px, 6vw, 80px)', fontSize: 'clamp(10px, 1vw, 14px)' }}>
                   {pageLabel}
                 </div>
 
                 <button
                   type="button"
                   onClick={handleNextPage}
-                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                  className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
+                  style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                   title="Next Page"
                 >
                   <ArrowRight size={14} />
                 </button>
               </div>
 
-              {/* RIGHT: Search function input field (keeps existing behavior) */}
+              {/* RIGHT: Search function input field */}
               <div className="viewer-toolbar-group flex items-center gap-1 sm:gap-2 lg:gap-3 min-w-0 relative z-10">
                 <form onSubmit={handleSearchExecute} className="flex items-center gap-1 w-full min-w-0">
                   <div className="relative min-w-0 w-[clamp(40px,20vw,325px)]">
+                    {/* Search icon or spinner */}
                     <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-neutral-400">
-                      <Search size={13} />
+                      {isSearching
+                        ? <svg className="animate-spin h-3 w-3 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>
+                        : <Search size={13} />}
                     </span>
                     <input
                       id="search_input"
@@ -1927,30 +2089,45 @@ export default function App() {
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search"
-                      className="h-8 pl-8 pr-2 border border-neutral-200 rounded text-sm text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors min-w-0 w-full"
-                      style={{ minWidth: '20px' }}
+                      className="border border-neutral-200 rounded text-neutral-800 placeholder-neutral-400 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400 font-sans transition-colors min-w-0 w-full"
+                      style={{ height: 'clamp(24px, 2.5vw, 32px)', paddingLeft: 'clamp(24px, 2.5vw, 32px)', paddingRight: 'clamp(20px, 2.2vw, 28px)', fontSize: 'clamp(10px, 1vw, 14px)', minWidth: '20px' }}
                     />
+                    {/* X clear button — only visible when there is text */}
+                    {searchQuery.length > 0 && (
+                      <button
+                        type="button"
+                        id="search_clear_btn"
+                        onClick={clearSearch}
+                        className="absolute inset-y-0 right-0 pr-2 flex items-center text-neutral-400 hover:text-neutral-700 transition-colors"
+                        title="Clear search"
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
                   </div>
                   <button
                     id="search_submit_btn"
                     type="submit"
-                    className="flex items-center gap-1 flex-shrink-0 text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-8 px-2 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
+                    disabled={isSearching}
+                    className="flex items-center flex-shrink-0 font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] disabled:opacity-60 disabled:cursor-not-allowed text-[#000000] rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-all duration-150 font-bold font-sans"
+                    style={{ height: 'clamp(24px, 2.5vw, 32px)', padding: '0 clamp(4px, 0.5vw, 8px)', fontSize: 'clamp(10px, 1vw, 14px)', gap: 'clamp(2px, 0.2vw, 4px)' }}
                     title="Find phrase"
                   >
-                    <span>Search</span>
+                    <span>{isSearching ? 'Searching…' : 'Search'}</span>
                   </button>
                 </form>
 
                 {/* Search result operators */}
                 {searchResults.length > 0 && (
                   <div className="flex items-center gap-1 font-sans">
-                    <span className="text-sm text-sky-950 font-bold ml-1.5 bg-sky-100/85 px-2.5 py-1 rounded border border-sky-200">
+                    <span className="text-sky-950 font-bold bg-sky-100/85 rounded border border-sky-200" style={{ fontSize: 'clamp(10px, 1vw, 14px)', marginLeft: 'clamp(2px, 0.3vw, 6px)', padding: 'clamp(2px, 0.3vw, 4px) clamp(4px, 0.6vw, 10px)' }}>
                       {currentSearchIndex + 1} of {searchResults.length}
                     </span>
                     <button
                       type="button"
                       onClick={() => handleJumpToSearchResult((currentSearchIndex - 1 + searchResults.length) % searchResults.length)}
-                      className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                      className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
+                      style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                       title="Prev Match"
                     >
                       ▲
@@ -1958,7 +2135,8 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => handleJumpToSearchResult((currentSearchIndex + 1) % searchResults.length)}
-                      className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 h-8 w-8 rounded shadow-sm cursor-pointer"
+                      className="flex items-center justify-center border border-neutral-200 bg-white hover:bg-[#f8fafc] text-neutral-800 rounded shadow-sm cursor-pointer"
+                      style={{ height: 'clamp(24px, 2.5vw, 32px)', width: 'clamp(24px, 2.5vw, 32px)' }}
                       title="Next Match"
                     >
                       ▼
@@ -1973,6 +2151,7 @@ export default function App() {
             <div className="flex-grow border border-neutral-200 rounded-lg flex flex-col min-h-0 relative overflow-hidden bg-[#edf0f2]">
               {/* Actual Dual-Page Render Arena */}
               <div
+                id="pdf_view_area"
                 ref={scrollContainerRef}
                 className="flex-1 overflow-y-auto overflow-x-scroll"
                 style={{ overflowAnchor: 'none' }}
@@ -1980,24 +2159,24 @@ export default function App() {
 
                 {/* Search error alert dialog */}
                 {searchError && (
-                  <div className="mx-auto my-4 max-w-md bg-white border border-neutral-200 rounded-lg shadow-lg text-sm text-left overflow-hidden z-20">
-                    <div className="bg-neutral-50 border-b border-neutral-200 px-3 py-2 text-sm font-semibold text-neutral-800 flex justify-between items-center">
+                  <div className="mx-auto my-4 bg-white border border-neutral-200 rounded-lg shadow-lg text-left overflow-hidden z-20" style={{ maxWidth: 'clamp(300px, 40vw, 450px)', fontSize: 'clamp(10px, 1vw, 14px)' }}>
+                    <div className="bg-neutral-50 border-b border-neutral-200 font-semibold text-neutral-800 flex justify-between items-center" style={{ padding: 'clamp(4px, 0.5vw, 8px) clamp(8px, 1vw, 16px)' }}>
                       <span>Search Query Outcome</span>
                       <button onClick={() => setSearchError('')} className="text-neutral-400 hover:text-neutral-600 font-bold">
-                        <X size={14} />
+                        <X style={{ width: 'clamp(12px, 1.2vw, 16px)', height: 'clamp(12px, 1.2vw, 16px)' }} />
                       </button>
                     </div>
-                    <div className="p-4 flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-full bg-amber-50 text-amber-500 flex items-center justify-center font-bold text-sm shrink-0">
-                        <ShieldAlert size={16} />
+                    <div className="flex items-start gap-3" style={{ padding: 'clamp(8px, 1vw, 16px)' }}>
+                      <div className="rounded-full bg-amber-50 text-amber-500 flex items-center justify-center font-bold shrink-0" style={{ width: 'clamp(24px, 2.5vw, 32px)', height: 'clamp(24px, 2.5vw, 32px)' }}>
+                        <ShieldAlert style={{ width: 'clamp(14px, 1.5vw, 20px)', height: 'clamp(14px, 1.5vw, 20px)' }} />
                       </div>
                       <div>
-                        <p className="font-bold text-neutral-800 mb-0.5">Database Query Alert</p>
+                        <p className="font-bold text-neutral-800" style={{ marginBottom: 'clamp(2px, 0.2vw, 4px)' }}>Database Query Alert</p>
                         <p className="text-neutral-600 line-clamp-2">{searchError}</p>
                       </div>
                     </div>
-                    <div className="p-2 px-3 bg-neutral-50 border-t border-neutral-100 flex justify-end">
-                      <button onClick={() => setSearchError('')} className="flex items-center justify-center text-sm font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] h-7 px-4 rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-colors font-bold font-sans">
+                    <div className="bg-neutral-50 border-t border-neutral-100 flex justify-end" style={{ padding: 'clamp(4px, 0.5vw, 8px) clamp(8px, 1vw, 16px)' }}>
+                      <button onClick={() => setSearchError('')} className="flex items-center justify-center font-semibold bg-[#7dd3fc] hover:bg-[#38bdf8] text-[#000000] rounded shadow-sm cursor-pointer select-none border border-[#38bdf8] transition-colors font-bold font-sans" style={{ height: 'clamp(20px, 2vw, 28px)', padding: '0 clamp(8px, 1vw, 16px)' }}>
                         Close
                       </button>
                     </div>
@@ -2022,7 +2201,10 @@ export default function App() {
                         // Precompute stable widths so the grid keeps exact spacing on resize
                         (() => {
                           const baseWidthForPdf = isPdfManual
-                            ? ((currentViewMode as any) === 'single' ? safeContainerWidth : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
+                            ? safeContainerWidth *
+                            ((currentViewMode as any) === 'single'
+                              ? VIEW_FIT.single
+                              : VIEW_FIT.double)
                             : safeContainerWidth;
                           const visualWidthForGrid = baseWidthForPdf * zoom;
                           const PAGE_GAP_PX = 20; // keep gap-20 equivalent (5rem ~= 80px)
@@ -2034,9 +2216,11 @@ export default function App() {
                                   <div className="w-full py-20 text-center text-neutral-500">Loading document...</div>
                                 ) : currentManualPages.map((page, idx) => {
                                   const baseWidth = isPdfManual
-                                    ? ((currentViewMode as any) === 'single'
-                                      ? safeContainerWidth
-                                      : safeContainerWidth * ((currentViewMode as any) === 'single' ? VIEW_FIT.single : VIEW_FIT.double))
+                                    ? (
+                                      currentViewMode === 'single'
+                                        ? safeContainerWidth * VIEW_FIT.single
+                                        : safeContainerWidth * VIEW_FIT.double
+                                    )
                                     : safeContainerWidth;
 
                                   const visualWidth = baseWidth * zoom;
@@ -2064,11 +2248,34 @@ export default function App() {
                                                       activeSearchTerm={activeSearchTerm}
                                                       activeMatchIndexOnPage={
                                                         selectedResult && selectedResult.pageNumber === page.pageNumber
-                                                          ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                          ? selectedResult.matchIndexOnPage
                                                           : -1
                                                       }
-                                                        width={Math.max(1, baseWidth * zoom)}
+                                                      width={Math.max(1, baseWidth * zoom)}
                                                       padding={0}
+                                                      onHighlightFound={(pageNumber, rect) => {
+                                                        activeHighlightRef.current = { pageNumber, ...rect };
+
+                                                        const pageElement = document.querySelector(
+                                                          `[data-page-number="${pageNumber}"]`
+                                                        ) as HTMLElement | null;
+
+                                                        if (!pageElement || !scrollContainerRef.current) return;
+                                                        const container = scrollContainerRef.current;
+
+                                                        // Scroll so the exact highlight rect is centered in the viewer
+                                                        const pageOffsetTop = (pageElement as HTMLElement).offsetTop;
+                                                        const pageOffsetLeft = (pageElement as HTMLElement).offsetLeft;
+
+                                                        const targetScrollTop = pageOffsetTop + rect.y + rect.h / 2 - container.clientHeight / 2;
+                                                        const targetScrollLeft = pageOffsetLeft + rect.x + rect.w / 2 - container.clientWidth / 2;
+
+                                                        container.scrollTo({
+                                                          top: Math.max(0, targetScrollTop),
+                                                          left: Math.max(0, targetScrollLeft),
+                                                          behavior: 'smooth'
+                                                        });
+                                                      }}
                                                     />
                                                   </div>
                                                 ) : (
@@ -2218,11 +2425,29 @@ export default function App() {
                                                   activeSearchTerm={activeSearchTerm}
                                                   activeMatchIndexOnPage={
                                                     selectedResult && selectedResult.pageNumber === page.pageNumber
-                                                      ? searchResults.slice(0, currentSearchIndex).filter(r => r.pageNumber === page.pageNumber).length
+                                                      ? selectedResult.matchIndexOnPage
                                                       : -1
                                                   }
                                                   width={Math.max(1, baseWidth * zoom)}
                                                   padding={0}
+                                                  onHighlightFound={(pageNumber, rect) => {
+                                                    const pageElement = document.querySelector(
+                                                      `[data-page-number="${pageNumber}"]`
+                                                    ) as HTMLElement | null;
+
+                                                    if (!pageElement || !scrollContainerRef.current) return;
+                                                    const container = scrollContainerRef.current;
+
+                                                    // Center the exact match rect in the viewer
+                                                    const pageOffsetTop = (pageElement as HTMLElement).offsetTop;
+                                                    const pageOffsetLeft = (pageElement as HTMLElement).offsetLeft;
+
+                                                    container.scrollTo({
+                                                      top: Math.max(0, pageOffsetTop + rect.y + rect.h / 2 - container.clientHeight / 2),
+                                                      left: Math.max(0, pageOffsetLeft + rect.x + rect.w / 2 - container.clientWidth / 2),
+                                                      behavior: 'smooth'
+                                                    });
+                                                  }}
                                                 />
                                               ) : (
                                                 <div

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hoverTexts>
+    <text id="user-handbook">General operating instructions, safety guidance, and basic system usage procedures.</text>
+    <text id="tech-manual-1">Technical reference documentation and detailed engineering information.</text>
+    <text id="tech-1-1">System architecture, functionality, specifications, and operational characteristics.</text>
+    <text id="tech-1-2">Engineering drawings, layouts, diagrams, and technical illustrations.</text>
+    <text id="tech-manual-2">Scheduled maintenance procedures, inspections, and servicing requirements.</text>
+    <text id="tech-2">Scheduled maintenance procedures, inspections, and servicing requirements.</text>
+    <text id="tech-manual-3">Overhaul procedures, restoration activities, and major component servicing.</text>
+    <text id="tech-3">Overhaul procedures, restoration activities, and major component servicing.</text>
+    <text id="tech-manual-4">It has 2 documents, covering Part Lists and Illustration of all the items.</text>
+    <text id="tech-4-1">Component identification, part references, and equipment breakdown structure.</text>
+    <text id="tech-4-2">Visual references, exploded views, and supporting graphical information.</text>
+    <text id="product-tree">System hierarchy, assemblies, subassemblies, and product structure relationships.</text>
+</hoverTexts>

@@ -326,21 +326,7 @@ export default function App() {
   // Hover drawer & speech state
   const [hoverInfo, setHoverInfo] = useState<null | { id: string; title: string; desc: string; top: number; left: number }>(null);
   const [spokenId, setSpokenId] = useState<string | null>(null);
-
-  const HOVER_DESCRIPTIONS: Record<string, string> = {
-    'user-handbook': 'General operating instructions, safety guidance, and basic system usage procedures.',
-    'tech-manual-1': 'Technical reference documentation and detailed engineering information.',
-    'tech-1-1': 'System architecture, functionality, specifications, and operational characteristics.',
-    'tech-1-2': 'Engineering drawings, layouts, diagrams, and technical illustrations.',
-    'tech-manual-2': 'Scheduled maintenance procedures, inspections, and servicing requirements.',
-    'tech-2': 'Scheduled maintenance procedures, inspections, and servicing requirements.',
-    'tech-manual-3': 'Overhaul procedures, restoration activities, and major component servicing.',
-    'tech-3': 'Overhaul procedures, restoration activities, and major component servicing.',
-    'tech-manual-4': 'It has 2 documents, covering Part Lists and Illustration of all the items.',
-    'tech-4-1': 'Component identification, part references, and equipment breakdown structure.',
-    'tech-4-2': 'Visual references, exploded views, and supporting graphical information.',
-    'product-tree': 'System hierarchy, assemblies, subassemblies, and product structure relationships.'
-  };
+  const [hoverDescriptions, setHoverDescriptions] = useState<Record<string, string>>({});
 
   // Speak description once per hover entry
   const speakDescription = (id: string, text: string) => {
@@ -935,7 +921,31 @@ export default function App() {
       }
     };
 
+    const loadHoverTexts = async () => {
+      try {
+        const hoverUrl = new URL('./assets/config/hoverTexts.xml', import.meta.url).href;
+        const resp = await fetch(hoverUrl);
+        if (!resp.ok) return;
+        const xmlText = await resp.text();
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(xmlText, 'application/xml');
+        
+        const newHoverTexts: Record<string, string> = {};
+        const textNodes = Array.from(xml.querySelectorAll('text'));
+        for (const t of textNodes) {
+          const id = t.getAttribute('id');
+          if (id) {
+            newHoverTexts[id] = t.textContent || '';
+          }
+        }
+        setHoverDescriptions(newHoverTexts);
+      } catch (err) {
+        console.error('Failed to load hover texts XML:', err);
+      }
+    };
+
     loadConfig();
+    loadHoverTexts();
 
     const updateTime = () => {
       const now = new Date();
@@ -1183,7 +1193,7 @@ export default function App() {
     const rect = target.getBoundingClientRect();
     const top = rect.top - panelRect.top + rect.height + 8; // position below the item
     const left = Math.min(panelRect.width - 20, rect.left - panelRect.left + 36);
-    const desc = HOVER_DESCRIPTIONS[id] || HOVER_DESCRIPTIONS[title.toLowerCase()] || manualsInfo[id]?.title || '';
+    const desc = hoverDescriptions[id] || hoverDescriptions[title.toLowerCase()] || manualsInfo[id]?.title || '';
 
     setHoverInfo({ id, title, desc, top, left });
     // speak once per enter
